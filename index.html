@@ -1,0 +1,2380 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, maximum-scale=1.0, user-scalable=no" />
+<title>Vibe</title>
+<!-- MODIFIED: PWA manifest + meta tags so "Add to Home screen" from Chrome
+     launches this as a standalone/fullscreen app (no address bar) instead
+     of a plain browser shortcut. -->
+<link rel="manifest" id="pwaManifestLink" href="manifest.json" />
+<meta name="theme-color" content="#000000" />
+<meta name="mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Vibe" />
+<link rel="apple-touch-icon" href="icon.svg" />
+<link rel="icon" href="icon.svg" type="image/svg+xml" />
+<script>
+  // MODIFIED: when this file is opened directly (content://, file://, or any
+  // origin where manifest.json / icon.svg aren't actually hosted next to it),
+  // the browser can't fetch those relative files, so "Add to Home screen"
+  // falls back to a plain bookmark that still shows the address bar. Build
+  // the manifest inline as a data: URI instead so standalone/fullscreen mode
+  // works no matter how the file was opened.
+  (function(){
+    // App icon: dark-to-bright diagonal gradient (blue → purple → pink →
+    // orange) behind a glowing white "Vibe" wordmark + soundwave squiggle,
+    // matching the icon design chosen for the home-screen/app icon.
+    var iconSvg = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">' +
+      '<defs>' +
+        '<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">' +
+          '<stop offset="0" stop-color="#2E5CFF"/>' +
+          '<stop offset="0.35" stop-color="#8A2BE8"/>' +
+          '<stop offset="0.68" stop-color="#FF2E8A"/>' +
+          '<stop offset="1" stop-color="#FF9A3D"/>' +
+        '</linearGradient>' +
+        '<filter id="glow" x="-60%" y="-60%" width="220%" height="220%">' +
+          '<feGaussianBlur stdDeviation="3" result="blur"/>' +
+          '<feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>' +
+        '</filter>' +
+      '</defs>' +
+      '<rect width="192" height="192" rx="42" fill="url(#bg)"/>' +
+      '<text x="96" y="106" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="52" fill="white" filter="url(#glow)">Vibe</text>' +
+      '<path d="M38 140 C 52 140, 52 120, 62 120 C 72 120, 72 152, 82 152 C 89 152, 89 130, 95 130 C 101 130, 101 148, 107 148 C 115 148, 115 132, 125 132 C 137 132, 137 140, 152 140" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" filter="url(#glow)"/>' +
+    '</svg>';
+    var iconSvgUri = 'data:image/svg+xml,' + encodeURIComponent(iconSvg);
+
+    // BUGFIX: Chrome's "Add to Home screen" doesn't reliably rasterize
+    // image/svg+xml manifest icons — on a lot of Android/Chrome builds it
+    // silently falls back to a blank/generic icon instead of erroring, so
+    // the SVG icon just never shows up on the launcher/shortcut. Chrome
+    // wants PNG. So: draw the SVG onto a canvas and export real PNG data
+    // URIs at 192px and 512px, and use those everywhere instead.
+    function svgToPng(svgUri, size){
+      return new Promise(function(resolve){
+        var img = new Image();
+        img.onload = function(){
+          var canvas = document.createElement('canvas');
+          canvas.width = size; canvas.height = size;
+          var ctx = canvas.getContext('2d');
+          ctx.drawImage(img, 0, 0, size, size);
+          try { resolve(canvas.toDataURL('image/png')); }
+          catch(e){ resolve(svgUri); } // fallback if canvas is ever tainted
+        };
+        img.onerror = function(){ resolve(svgUri); };
+        img.src = svgUri;
+      });
+    }
+
+    function buildManifest(uri192, uri512, type){
+      return {
+        name: 'Vibe',
+        short_name: 'Vibe',
+        start_url: '.',
+        display: 'standalone',
+        orientation: 'portrait',
+        background_color: '#000000',
+        theme_color: '#000000',
+        icons: [
+          { src: uri192, sizes: '192x192', type: type },
+          { src: uri512, sizes: '512x512', type: type },
+          { src: uri192, sizes: '192x192', type: type, purpose: 'maskable' },
+          { src: uri512, sizes: '512x512', type: type, purpose: 'maskable' }
+        ]
+      };
+    }
+
+    function applyIcons(uri192, uri512, type){
+      var manifest = buildManifest(uri192, uri512, type);
+      var blob = new Blob([JSON.stringify(manifest)], { type: 'application/manifest+json' });
+      document.getElementById('pwaManifestLink').setAttribute('href', URL.createObjectURL(blob));
+      document.querySelectorAll('link[rel="apple-touch-icon"], link[rel="icon"]').forEach(function(l){ l.setAttribute('href', uri192); });
+    }
+
+    // BUGFIX (root cause of both the "second broken loading screen" flicker
+    // AND the missing Chrome shortcut icon): this used to look up
+    // #startOverlayIcon and try to set the manifest here, in the SAME
+    // synchronous tick — but this <script> runs while the parser is still
+    // inside <head>, before any element in <body> exists yet. That lookup
+    // always returned null, so nothing was actually set until the async
+    // PNG-rasterization promise resolved much later. Two consequences:
+    //   1) the splash icon (now an inline <svg> in the markup below, so this
+    //      script no longer needs to touch it at all) had nothing driving it
+    //      early, causing the broken-image flash.
+    //   2) if "Add to Home screen" fired before that async work finished,
+    //      Chrome could grab a manifest with no working icon at all.
+    // Fix: apply a fully valid manifest+icon links SYNCHRONOUSLY right here,
+    // using the SVG data URI directly (works immediately, no image decode/
+    // canvas round-trip needed, and doesn't touch the DOM at all). Then
+    // upgrade to real rasterized PNGs asynchronously for the Android
+    // launchers that don't rasterize SVG manifest icons well. Either way,
+    // a *valid* icon exists from the very first instant of execution.
+    applyIcons(iconSvgUri, iconSvgUri, 'image/svg+xml');
+    Promise.all([svgToPng(iconSvgUri, 192), svgToPng(iconSvgUri, 512)]).then(function(results){
+      applyIcons(results[0], results[1], 'image/png');
+    });
+  })();
+</script>
+<script src="https://cdn.tailwindcss.com"></script>
+<!-- MODIFIED: Poppins — a rounded geometric sans close to a clean, bold-leaning geometric look (clean, bold-leaning, tight tracking) -->
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+<script>
+  // MODIFIED: guarded — if the Tailwind CDN script fails to load (network
+  // block/timeout), `tailwind` stays undefined and this used to throw an
+  // uncaught ReferenceError that broke the page (blank/unstyled screen).
+  if (window.tailwind) {
+    tailwind.config = { theme: { extend: { fontFamily: { sans: ['Poppins', 'sans-serif'] } } } };
+  }
+</script>
+<style>
+  * { -webkit-tap-highlight-color: transparent; }
+  html, body { margin:0; padding:0; background:#121214; overscroll-behavior:none; font-family: 'Poppins', sans-serif; }
+  #feed { scrollbar-width:none; }
+  #feed::-webkit-scrollbar { display:none; }
+  /* MODIFIED: opacity 1 (was .85), blur removed (was 0.5px), color forced to pure #FFFFFF */
+  .lyric-line {
+    transition: transform .4s ease, text-shadow .5s ease;
+    opacity:1; transform: scale(1); font-weight:800; color:#FFFFFF;
+    letter-spacing: .2px;
+    /* MODIFIED: crisp black outline (like screenshot's bold caption style) built from
+       stacked text-shadows — works everywhere, unlike -webkit-text-stroke which clips
+       thin glyph strokes on some Android WebViews. */
+    text-shadow:
+      -1.5px -1.5px 0 #000, 1.5px -1.5px 0 #000, -1.5px 1.5px 0 #000, 1.5px 1.5px 0 #000,
+      0 -1.5px 0 #000, 0 1.5px 0 #000, -1.5px 0 0 #000, 1.5px 0 0 #000,
+      0 3px 8px rgba(0,0,0,.6);
+  }
+  /* MODIFIED: active line kept same size/scale, color forced to pure #FFFFFF, thicker outline for emphasis */
+  .lyric-line.active {
+    opacity:1; transform: scale(1.06); font-weight:800; color:#FFFFFF;
+    letter-spacing: .2px;
+    text-shadow:
+      -2px -2px 0 #000, 2px -2px 0 #000, -2px 2px 0 #000, 2px 2px 0 #000,
+      0 -2px 0 #000, 0 2px 0 #000, -2px 0 0 #000, 2px 0 0 #000,
+      0 4px 12px rgba(0,0,0,.7);
+  }
+  /* MODIFIED: removed mask-image fade (was transparent 0% -> black 40%) — that gradient was
+     making the lyrics container itself fade/dim at the top, on top of the per-line opacity. */
+  .lyrics-scroll { }
+  .action-glass { backdrop-filter: blur(12px) saturate(160%); -webkit-backdrop-filter: blur(12px) saturate(160%); background: rgba(255,255,255,0.1); border: 1px solid rgba(255,255,255,0.12); }
+  .eq-bar { animation: eq 0.9s ease-in-out infinite; transform-origin: bottom; }
+  .eq-bar:nth-child(2){ animation-delay:.15s; }
+  .eq-bar:nth-child(3){ animation-delay:.3s; }
+  @keyframes eq { 0%,100%{ transform: scaleY(.3);} 50%{ transform: scaleY(1);} }
+  .glass { background: rgba(255,255,255,0.08); backdrop-filter: blur(18px) saturate(160%); -webkit-backdrop-filter: blur(18px) saturate(160%); border: 1px solid rgba(255,255,255,0.12); }
+  .fade-in { animation: fadeIn .4s ease forwards; }
+  @keyframes fadeIn { from{opacity:0; transform:translateY(8px);} to{opacity:1; transform:translateY(0);} }
+  .heart-pop { animation: pop .35s ease; }
+  @keyframes pop { 0%{transform:scale(1);} 40%{transform:scale(1.4);} 100%{transform:scale(1);} }
+  .spinner { border: 3px solid rgba(255,255,255,.15); border-top-color: #fff; border-radius:50%; width:34px; height:34px; animation: spin 0.8s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .toast { animation: toastIn .25s ease, toastOut .25s ease 1.75s forwards; }
+  @keyframes toastIn { from{opacity:0; transform:translate(-50%,10px);} to{opacity:1; transform:translate(-50%,0);} }
+  @keyframes toastOut { to{opacity:0; transform:translate(-50%,-6px);} }
+</style>
+</head>
+<body class="bg-[#121214] text-white font-sans overflow-hidden" style="height:100dvh;">
+
+<div id="app" class="relative w-full" style="height:100dvh;">
+
+  <!-- Ambient global backdrop -->
+  <div id="ambientBg" class="fixed inset-0 -z-10 bg-cover bg-center opacity-60 blur-2xl scale-125 transition-all duration-700" style="background-color:#0a0a0f;"></div>
+
+  <!-- Start overlay: MODIFIED — no more "Tap to Start Vibe" button; the
+       player now loads and opens automatically. This stays up only as a
+       brief loading screen while the first batch of songs fetches. -->
+  <div id="startOverlay" class="fixed inset-0 z-50 flex flex-col items-center justify-center bg-[#121214]/95 px-8 text-center">
+    <!-- MODIFIED: sizing set via inline style (not just the w-24/h-24/rounded-[22px]
+         Tailwind classes) because Tailwind here loads from a CDN script tag that needs
+         a moment to download+run before its utility CSS exists. Without this inline
+         style, the icon briefly paints at its raw intrinsic size (huge) and then
+         snaps down to 96px once Tailwind catches up — a visible flash/jump. Inline
+         style applies instantly, no matter how long Tailwind takes. -->
+    <!-- MODIFIED: was an <img src=""> populated by JS after the splash
+         painted — a race against the head script (see the <head> comment)
+         meant this often showed a broken-image icon before the src was
+         set. Inline SVG paints instantly with the HTML parser itself, so
+         there's no intermediate broken state possible. -->
+    <div class="mb-6 shadow-2xl shadow-fuchsia-900/40" style="width:96px;height:96px;border-radius:22px;overflow:hidden;flex-shrink:0;">
+      <svg viewBox="0 0 192 192" xmlns="http://www.w3.org/2000/svg" style="width:100%;height:100%;display:block;">
+        <defs>
+          <linearGradient id="splashIconBg" x1="0" y1="0" x2="1" y2="1">
+            <stop offset="0" stop-color="#2E5CFF"/>
+            <stop offset="0.35" stop-color="#8A2BE8"/>
+            <stop offset="0.68" stop-color="#FF2E8A"/>
+            <stop offset="1" stop-color="#FF9A3D"/>
+          </linearGradient>
+          <filter id="splashIconGlow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="3" result="blur"/>
+            <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+          </filter>
+        </defs>
+        <rect width="192" height="192" fill="url(#splashIconBg)"/>
+        <text x="96" y="106" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="52" fill="white" filter="url(#splashIconGlow)">Vibe</text>
+        <path d="M38 140 C 52 140, 52 120, 62 120 C 72 120, 72 152, 82 152 C 89 152, 89 130, 95 130 C 101 130, 101 148, 107 148 C 115 148, 115 132, 125 132 C 137 132, 137 140, 152 140" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" filter="url(#splashIconGlow)"/>
+      </svg>
+    </div>
+    <div id="loadingWrap" class="mt-4 flex flex-col items-center gap-3">
+      <div class="spinner"></div>
+      <p class="text-white/40 text-xs">Loading your vibe…</p>
+    </div>
+  </div>
+
+  <!-- MODIFIED: search + library floating buttons removed from the player — both are already reachable via the bottom nav's Search and Me tabs -->
+  <button id="searchBtn" class="hidden fixed top-4 left-4 z-40 w-9 h-9 rounded-full glass items-center justify-center text-sm">🔍</button>
+
+  <!-- Stats button -->
+  <!-- MODIFIED: stats button removed from here — now lives inside the Me tab (see tabMe) -->
+  <button id="statsBtn" class="hidden fixed top-4 right-4 z-40 w-9 h-9 rounded-full glass items-center justify-center text-sm">📊</button>
+
+  <!-- Library button (Liked Songs + Playlists) -->
+  <button id="libraryBtn" class="hidden fixed top-4 right-14 z-40 w-9 h-9 rounded-full glass items-center justify-center text-sm">📚</button>
+
+  <!-- Search / Browse modal -->
+  <div id="searchModal" class="hidden fixed inset-0 z-50 bg-[#121214] flex-col" style="height:100dvh;">
+    <div class="flex items-center gap-2 px-4 pt-4 pb-3 flex-shrink-0">
+      <button id="closeSearch" class="w-9 h-9 rounded-full glass flex items-center justify-center text-lg flex-shrink-0">←</button>
+      <input id="searchInput" type="text" placeholder="Search songs, artists, movies…" class="flex-1 min-w-0 bg-white/10 border border-white/15 rounded-full px-4 py-2.5 text-sm outline-none focus:border-white/40" />
+    </div>
+    <p id="searchStatus" class="px-5 pb-2 text-xs text-white/40 flex-shrink-0">Search for songs, artists, or movies</p>
+    <div id="searchResults" class="flex-1 overflow-y-auto px-3 pb-6 space-y-1"></div>
+  </div>
+
+  <!-- Library modal: Liked Songs + Playlists -->
+  <div id="libraryModal" class="hidden fixed inset-0 z-50 bg-[#121214] flex-col" style="height:100dvh;">
+    <div class="flex items-center gap-2 px-4 pt-4 pb-3 flex-shrink-0">
+      <button id="closeLibrary" class="w-9 h-9 rounded-full glass flex items-center justify-center text-lg flex-shrink-0">←</button>
+      <h2 class="font-bold text-lg">Your Library</h2>
+    </div>
+    <div class="flex gap-2 px-4 pb-3 flex-shrink-0">
+      <button id="libTabLiked" class="lib-tab flex-1 py-2 rounded-full text-xs font-semibold bg-white/15">❤️ Liked Songs</button>
+      <button id="libTabPlaylists" class="lib-tab flex-1 py-2 rounded-full text-xs font-semibold bg-white/5">🎧 Playlists</button>
+    </div>
+    <div id="libraryBody" class="flex-1 overflow-y-auto px-3 pb-6 space-y-1"></div>
+  </div>
+
+  <!-- Add-to-playlist picker -->
+  <div id="playlistPickerModal" class="hidden fixed inset-0 z-50 bg-black/70 items-end justify-center">
+    <div class="glass rounded-t-2xl p-4 w-full max-w-md max-h-[70vh] flex flex-col">
+      <div class="flex items-center justify-between mb-3 flex-shrink-0">
+        <h2 class="font-bold text-base">Add to Playlist</h2>
+        <button id="closePlaylistPicker" class="text-white/50 text-xl leading-none">×</button>
+      </div>
+      <div class="flex gap-2 mb-3 flex-shrink-0">
+        <input id="newPlaylistName" type="text" placeholder="New playlist name…" class="flex-1 min-w-0 bg-white/10 border border-white/15 rounded-full px-4 py-2 text-sm outline-none focus:border-white/40" />
+        <button id="createPlaylistBtn" class="px-4 py-2 rounded-full bg-white/15 text-sm font-semibold flex-shrink-0">Create</button>
+      </div>
+      <div id="playlistPickerList" class="overflow-y-auto space-y-1.5"></div>
+    </div>
+  </div>
+
+  <!-- Follow-artist picker -->
+  <div id="followPickerModal" class="hidden fixed inset-0 z-50 bg-black/70 items-end justify-center">
+    <div class="glass rounded-t-2xl p-4 w-full max-w-md max-h-[70vh] flex flex-col">
+      <div class="flex items-center justify-between mb-3 flex-shrink-0">
+        <h2 class="font-bold text-base">Follow Artists</h2>
+        <button id="closeFollowPicker" class="text-white/50 text-xl leading-none">×</button>
+      </div>
+      <p class="text-[11px] text-white/40 mb-3 flex-shrink-0">Choose who to follow — tap again to unfollow.</p>
+      <div id="followPickerList" class="overflow-y-auto space-y-1.5"></div>
+    </div>
+  </div>
+
+  <!-- Stats modal -->
+  <div id="statsModal" class="hidden fixed inset-0 z-50 bg-black/70 items-center justify-center px-6">
+    <div class="glass rounded-2xl p-5 w-full max-w-sm">
+      <div class="flex items-center justify-between mb-4">
+        <h2 class="font-bold text-lg">Your Vibe Stats</h2>
+        <button id="closeStats" class="text-white/50 text-xl leading-none">×</button>
+      </div>
+      <div id="statsBody" class="text-sm space-y-2 text-white/80 max-h-[50vh] overflow-y-auto"></div>
+      <p class="text-[10px] text-white/30 mt-4">Stored locally in your browser (localStorage). Nothing leaves your device.</p>
+    </div>
+  </div>
+
+  <!-- Feed (this is the "For You" tab) -->
+  <div id="tabForYou" class="hidden">
+    <div id="feed" class="w-full snap-y snap-mandatory overflow-y-scroll" style="height:100dvh;"></div>
+  </div>
+
+  <!-- Music tab: home carousels -->
+  <div id="tabMusic" class="hidden overflow-y-auto px-4 pt-5" style="height:100dvh; padding-bottom:6rem;">
+    <div class="flex items-center justify-between mb-5">
+      <h1 class="text-xl font-extrabold">Music</h1>
+      <button id="dailyMixBtn" class="flex items-center gap-1.5 px-4 py-2 rounded-full glass text-xs font-semibold">
+        <span class="w-5 h-5 rounded-full bg-white/20 flex items-center justify-center">▶</span> Your Daily Mix
+      </button>
+    </div>
+
+    <p class="text-sm font-bold text-white/80 mb-2.5">Suggested Radios</p>
+    <div id="moodGrid" class="grid grid-cols-3 gap-2.5 mb-6"></div>
+
+    <p class="text-sm font-bold text-white/80 mb-2.5">Artist Radios</p>
+    <div id="artistRadioRow" class="flex gap-3 overflow-x-auto pb-2 mb-6" style="scrollbar-width:none;"></div>
+
+    <div id="musicHomeSections"></div>
+  </div>
+
+  <!-- Search tab: browse home (typing goes through the existing search modal) -->
+  <div id="tabSearchHome" class="hidden overflow-y-auto px-4 pt-5" style="height:100dvh; padding-bottom:6rem;">
+    <button id="openSearchModalBtn" class="w-full flex items-center gap-2 bg-white/10 border border-white/15 rounded-full px-4 py-2.5 text-sm text-white/50 mb-5">
+      🔍 Search songs, artists, movies…
+    </button>
+
+    <div class="grid grid-cols-2 gap-3 mb-6">
+      <button class="topChartsBtn text-left p-4 rounded-2xl bg-gradient-to-br from-rose-600 to-orange-500" data-query="Top Bollywood Hits">
+        <p class="text-lg font-extrabold leading-none">TOP<br/>CHARTS</p>
+      </button>
+      <button class="topChartsBtn text-left p-4 rounded-2xl bg-gradient-to-br from-blue-600 to-indigo-500" data-query="New Bollywood Releases">
+        <p class="text-lg font-extrabold leading-none">NEW<br/>RELEASES</p>
+      </button>
+    </div>
+
+    <p class="text-sm font-bold text-white/80 mb-2.5">Browse All</p>
+    <div id="browseAllGrid" class="grid grid-cols-2 gap-3 mb-6"></div>
+
+    <p class="text-sm font-bold text-white/80 mb-2.5">Top 50</p>
+    <div id="top50List" class="space-y-2.5"></div>
+  </div>
+
+  <!-- Me tab: profile -->
+  <div id="tabMe" class="hidden overflow-y-auto px-4 pt-6" style="height:100dvh; padding-bottom:6rem;">
+    <div class="flex items-center justify-between mb-1">
+      <button id="meAvatarBtn" class="w-14 h-14 rounded-full bg-white/10 border border-white/10 flex items-center justify-center overflow-hidden flex-shrink-0">
+        <img id="meAvatarImg" src="" class="hidden w-full h-full object-cover" alt="" />
+        <svg id="meAvatarPlaceholder" width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="rgba(255,255,255,0.55)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-7 8-7s8 3 8 7"/></svg>
+      </button>
+      <input id="meAvatarInput" type="file" accept="image/*" class="hidden" />
+    </div>
+    <button id="editNameBtn" class="flex items-center gap-1.5 mt-3 mb-2">
+      <span id="meName" class="text-2xl font-extrabold"></span>
+      <span class="text-white/40 text-sm">›</span>
+    </button>
+    <p class="text-xs text-white/40 mb-4">Everything below is stored only on this device.</p>
+
+    <!-- MODIFIED: Stats moved here from the top-right floating icon (removed for a cleaner player view) -->
+    <button id="statsRowBtn" class="w-full flex items-center gap-3 bg-white/8 border border-white/10 rounded-2xl px-4 py-3 mb-5">
+      <span class="w-9 h-9 rounded-full action-glass flex items-center justify-center flex-shrink-0">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+      </span>
+      <span class="text-sm font-semibold flex-1 text-left">Your Vibe Stats</span>
+      <span class="text-white/40 text-sm">›</span>
+    </button>
+
+    <div class="flex gap-5 border-b border-white/10 mb-4 text-sm">
+      <button class="meTab font-semibold pb-2 border-b-2 border-white text-white" data-tab="library">Library</button>
+      <button class="meTab font-semibold pb-2 border-b-2 border-transparent text-white/40" data-tab="following">Following</button>
+      <button class="meTab font-semibold pb-2 border-b-2 border-transparent text-white/40" data-tab="history">History</button>
+    </div>
+    <div id="meBody"></div>
+  </div>
+
+  <!-- Bottom navigation. MODIFIED: emoji swapped for line-style SVG icons to match
+       the modernized right action bar; active tab fills solid, inactive stays outline. -->
+  <div id="bottomNav" class="fixed bottom-0 inset-x-0 z-40 flex items-end justify-around bg-[#121214]/90 backdrop-blur border-t border-white/10" style="padding-bottom:calc(env(safe-area-inset-bottom, 0px) + 10px); height:4rem;">
+    <button class="navTabBtn flex flex-col items-center gap-1 flex-1 py-1.5" data-tab="music">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>
+      <span class="text-[10px] font-medium">Music</span>
+    </button>
+    <button class="navTabBtn flex flex-col items-center gap-1 flex-1 py-1.5" data-tab="forYou">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.7-4.3-9.3-8.2C1 10.2 1.6 6.6 4.6 5 7 3.7 9.7 4.5 12 7.2 14.3 4.5 17 3.7 19.4 5c3 1.6 3.6 5.2 1.9 7.8C18.7 16.7 12 21 12 21z"/></svg>
+      <span class="text-[10px] font-medium">For You</span>
+    </button>
+    <button class="navTabBtn flex flex-col items-center gap-1 flex-1 py-1.5" data-tab="search">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <span class="text-[10px] font-medium">Search</span>
+    </button>
+    <button class="navTabBtn flex flex-col items-center gap-1 flex-1 py-1.5" data-tab="me">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+      <span class="text-[10px] font-medium">Me</span>
+    </button>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast" class="hidden fixed bottom-24 left-1/2 z-50 glass px-4 py-2 rounded-full text-xs font-medium toast"></div>
+</div>
+
+
+<script>
+(function(){
+  "use strict";
+
+  /* ---------------------------------------------------------------------
+   * STORAGE HELPERS
+   * ------------------------------------------------------------------- */
+  const LS_LIKES = 'vibe_likes';
+  const LS_HISTORY = 'vibe_history';
+  const LS_LOOPS = 'vibe_loops';
+  const LS_FOLLOWED = 'vibe_followed_artists';
+
+  const getLS = (k, fallback) => { try { const v = JSON.parse(localStorage.getItem(k)); return v === null || v === undefined ? fallback : v; } catch(e){ return fallback; } };
+  const setLS = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } catch(e){} };
+
+  let likes = getLS(LS_LIKES, []);          // array of track ids
+  let history = getLS(LS_HISTORY, []);      // array of {id,title,artist,percent,seconds,ts}
+  let loops = getLS(LS_LOOPS, {});          // { trackId: count }
+  let followedArtists = getLS(LS_FOLLOWED, []); // array of artist name strings
+
+  function logHistory(entry){
+    history.push(entry);
+    if (history.length > 300) history = history.slice(-300); // cap growth
+    setLS(LS_HISTORY, history);
+  }
+  function toggleLike(song){
+    const id = song.id;
+    const i = likes.indexOf(id);
+    const nowLiked = i === -1;
+    if (nowLiked) { likes.push(id); idbPut('likedSongs', songSnapshot(song)).catch(()=>{}); }
+    else { likes.splice(i,1); idbDelete('likedSongs', id).catch(()=>{}); }
+    setLS(LS_LIKES, likes);
+    return nowLiked;
+  }
+  function isFollowing(artistName){
+    return followedArtists.includes(artistName);
+  }
+  function toggleFollow(artistName){
+    if (!artistName) return false;
+    const i = followedArtists.indexOf(artistName);
+    const nowFollowing = i === -1;
+    if (nowFollowing) followedArtists.push(artistName);
+    else followedArtists.splice(i, 1);
+    setLS(LS_FOLLOWED, followedArtists);
+    return nowFollowing;
+  }
+  function incrementLoop(id){
+    loops[id] = (loops[id]||0) + 1;
+    setLS(LS_LOOPS, loops);
+    return loops[id];
+  }
+
+  /* ---------------------------------------------------------------------
+   * INDEXEDDB — liked songs + playlists (structured, larger-capacity
+   * storage than localStorage; also stores the original JioSaavn "raw"
+   * object per song so audio/lyrics can be re-fetched fresh whenever a
+   * saved song is played again later, since stream URLs expire).
+   * ------------------------------------------------------------------- */
+  const IDB_NAME = 'vibe_db';
+  const IDB_VERSION = 1;
+  let idbOpenPromise = null;
+  function openDB(){
+    if (idbOpenPromise) return idbOpenPromise;
+    idbOpenPromise = new Promise((resolve, reject) => {
+      if (!window.indexedDB){ reject(new Error('IndexedDB unavailable')); return; }
+      const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+      req.onupgradeneeded = (e) => {
+        const db = e.target.result;
+        if (!db.objectStoreNames.contains('likedSongs')) db.createObjectStore('likedSongs', { keyPath: 'id' });
+        if (!db.objectStoreNames.contains('playlists')) db.createObjectStore('playlists', { keyPath: 'id' });
+      };
+      req.onsuccess = (e) => resolve(e.target.result);
+      req.onerror = () => reject(req.error);
+    });
+    return idbOpenPromise;
+  }
+  function lsFallbackKey(store){ return 'vibe_idbfallback_' + store; }
+  function lsFallbackGetAll(store){
+    try { return JSON.parse(localStorage.getItem(lsFallbackKey(store)) || '{}'); } catch(e){ return {}; }
+  }
+  function lsFallbackSetAll(store, obj){
+    try { localStorage.setItem(lsFallbackKey(store), JSON.stringify(obj)); } catch(e){}
+  }
+  async function idbPut(store, value){
+    try {
+      const db = await openDB();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        tx.objectStore(store).put(value);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch(err){
+      const all = lsFallbackGetAll(store);
+      all[value.id] = value;
+      lsFallbackSetAll(store, all);
+      return true;
+    }
+  }
+  async function idbDelete(store, key){
+    try {
+      const db = await openDB();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readwrite');
+        tx.objectStore(store).delete(key);
+        tx.oncomplete = () => resolve(true);
+        tx.onerror = () => reject(tx.error);
+      });
+    } catch(err){
+      const all = lsFallbackGetAll(store);
+      delete all[key];
+      lsFallbackSetAll(store, all);
+      return true;
+    }
+  }
+  async function idbGetAll(store){
+    try {
+      const db = await openDB();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).getAll();
+        req.onsuccess = () => resolve(req.result || []);
+        req.onerror = () => reject(req.error);
+      });
+    } catch(err){
+      return Object.values(lsFallbackGetAll(store));
+    }
+  }
+  async function idbGet(store, key){
+    try {
+      const db = await openDB();
+      return await new Promise((resolve, reject) => {
+        const tx = db.transaction(store, 'readonly');
+        const req = tx.objectStore(store).get(key);
+        req.onsuccess = () => resolve(req.result || null);
+        req.onerror = () => reject(req.error);
+      });
+    } catch(err){
+      const all = lsFallbackGetAll(store);
+      return all[key] || null;
+    }
+  }
+
+  function songSnapshot(song){
+    return {
+      id: song.id, title: song.title, artist: song.artist, artistList: song.artistList || [],
+      album: song.album || '', language: song.language || '', artwork: song.artwork,
+      raw: song.raw || null, addedAt: Date.now()
+    };
+  }
+
+  async function createPlaylist(name){
+    const pl = { id: 'pl_' + Date.now() + '_' + Math.random().toString(36).slice(2,7), name: (name||'').trim() || 'New Playlist', createdAt: Date.now(), songs: [] };
+    await idbPut('playlists', pl);
+    return pl;
+  }
+  async function addSongToPlaylist(playlistId, song){
+    const pl = await idbGet('playlists', playlistId);
+    if (!pl) return false;
+    if (pl.songs.some(s => s.id === song.id)) return false; // already in there
+    pl.songs.push(songSnapshot(song));
+    await idbPut('playlists', pl);
+    return true;
+  }
+  async function removeSongFromPlaylist(playlistId, songId){
+    const pl = await idbGet('playlists', playlistId);
+    if (!pl) return;
+    pl.songs = pl.songs.filter(s => s.id !== songId);
+    await idbPut('playlists', pl);
+  }
+  async function deletePlaylist(playlistId){
+    await idbDelete('playlists', playlistId);
+  }
+
+  /* ---------------------------------------------------------------------
+   * LRC PARSER
+   * ------------------------------------------------------------------- */
+  function parseLRC(raw){
+    const lines = raw.split('\n');
+    const out = [];
+    const re = /\[(\d{2}):(\d{2})[.:](\d{2,3})\]/g;
+    // [offset:+/-ms] metadata tag — some LRC files shift every timestamp by
+    // a fixed amount. Ignoring it was a real source of "highlight doesn't
+    // match the audio" desync whenever a file actually had one.
+    const offsetMatch = raw.match(/\[offset:\s*(-?\d+)\]/i);
+    const offsetSeconds = offsetMatch ? parseInt(offsetMatch[1], 10) / 1000 : 0;
+    for (const line of lines){
+      re.lastIndex = 0;
+      const tags = [...line.matchAll(re)];
+      if (!tags.length) continue;
+      const text = line.replace(re, '').trim();
+      for (const t of tags){
+        const min = parseInt(t[1],10), sec = parseInt(t[2],10);
+        let ms = t[3]; ms = ms.length === 2 ? parseInt(ms,10)*10 : parseInt(ms,10);
+        // LRC convention: positive offset means the tagged times are late
+        // (lyrics should show earlier), so subtract it.
+        const time = Math.max(0, min*60 + sec + ms/1000 - offsetSeconds);
+        out.push({ time, text: text || '♪' });
+      }
+    }
+    out.sort((a,b)=>a.time-b.time);
+    return out;
+  }
+
+  /* ---------------------------------------------------------------------
+   * DATA FETCHING (free, no-key APIs)
+   * ------------------------------------------------------------------- */
+  function fetchWithTimeout(url, ms){
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), ms);
+    return fetch(url, { signal: controller.signal }).finally(() => clearTimeout(timer));
+  }
+
+  // JioSaavn public API — gives direct 320kbps MP3 stream URLs, high-res
+  // album art, and full track metadata. No key, no preview limit: the URL
+  // we get back IS the full song.
+  // Five independent public deployments of the same open-source API,
+  // across different individual developers/domains (not just the two
+  // well-known ones) — a network-level block is far less likely to hit
+  // all of them. All are tried DIRECT, in parallel — first one to answer
+  // wins. Only if every single direct attempt fails do we fall through
+  // to relaying every host through every CORS relay, also in parallel.
+  const SAAVN_HOSTS = [
+    'https://jiosaavn-api-v3.vercel.app',
+    'https://powerapi-song.vercel.app',
+    'https://jiosavan-azure.vercel.app',
+    'https://saavn.dev',
+    'https://saavn.me'
+  ];
+  const RELAY_BUILDERS = [
+    (u) => `https://api.allorigins.win/raw?url=${encodeURIComponent(u)}`,
+    (u) => `https://corsproxy.io/?url=${encodeURIComponent(u)}`,
+    (u) => `https://api.codetabs.com/v1/proxy?quest=${encodeURIComponent(u)}`,
+    (u) => `https://thingproxy.freeboard.io/fetch/${u}`
+  ];
+
+  function saavnUrl(host, term, limit){
+    return `${host}/api/search/songs?query=${encodeURIComponent(term)}&limit=${limit}`;
+  }
+
+  async function tryFetchResults(url, ms){
+    const res = await fetchWithTimeout(url, ms);
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+    const data = await res.json();
+    const results = (data && data.data && data.data.results) || [];
+    if (!results.length) throw new Error('empty results');
+    return results;
+  }
+
+  function firstErrorMessage(aggregateOrErr){
+    if (aggregateOrErr && aggregateOrErr.errors && aggregateOrErr.errors.length){
+      return aggregateOrErr.errors[0].message || String(aggregateOrErr.errors[0]);
+    }
+    return (aggregateOrErr && aggregateOrErr.message) || String(aggregateOrErr);
+  }
+
+  async function fetchSaavnBatch(term, limit){
+    const urls = SAAVN_HOSTS.map(h => saavnUrl(h, term, limit));
+
+    // Phase 1 — every host, direct, in parallel.
+    try {
+      return await Promise.any(urls.map(u => tryFetchResults(u, 7000)));
+    } catch(e1){
+      lastFetchError = firstErrorMessage(e1);
+    }
+
+    // Phase 2 — every host through every relay, in parallel.
+    try {
+      const attempts = [];
+      for (const u of urls){
+        for (const build of RELAY_BUILDERS){
+          attempts.push(tryFetchResults(build(u), 9000));
+        }
+      }
+      return await Promise.any(attempts);
+    } catch(e2){
+      lastFetchError = firstErrorMessage(e2);
+      return [];
+    }
+  }
+  let lastFetchError = '';
+
+  // JioSaavn metadata is clean (proper title/artist, not messy YouTube
+  // titles), so lrclib's fuzzy /search is tried first, exact /get second.
+  // IMPORTANT: lrclib's /search is a *fuzzy* text match — it has no idea
+  // which actual recording our JioSaavn audio is. A title+artist query for
+  // e.g. a movie song often returns lyrics for a different cut/remix/
+  // reprise with a different length, whose timestamps then don't line up
+  // with our audio at all (lines just never look "active" because their
+  // times are all past — or before — wherever our track actually is).
+  // Fix: only accept a search result whose reported duration is within a
+  // few seconds of our actual JioSaavn track duration. If nothing close
+  // enough is found, fall through to /api/get, which lrclib itself will
+  // duration-match server-side (and 404 if nothing fits, instead of
+  // silently handing back a mismatched track).
+  // Loose word-overlap check between our track's title and a candidate
+  // lyrics-DB result's title — catches lrclib's fuzzy /search handing back
+  // a totally different song that just happens to have a similar duration
+  // (the actual cause of "lyrics from some other song entirely playing").
+  function normalizeTitleWords(s){
+    return (s || '').toLowerCase().replace(/[^a-z0-9\u0900-\u097F\u0A00-\u0A7F\s]/g, ' ').replace(/\s+/g, ' ').trim().split(' ').filter(Boolean);
+  }
+  function titleOverlapScore(a, b){
+    const wa = new Set(normalizeTitleWords(a));
+    const wb = new Set(normalizeTitleWords(b));
+    if (!wa.size || !wb.size) return 0;
+    let common = 0;
+    wa.forEach(w => { if (wb.has(w)) common++; });
+    return common / Math.min(wa.size, wb.size);
+  }
+
+  async function lrclibSearch(query, expectedDuration, expectedTitle){
+    const res = await fetchWithTimeout(`https://lrclib.net/api/search?q=${encodeURIComponent(query)}`, 6000);
+    if (!res.ok) return null;
+    const results = await res.json();
+    if (!Array.isArray(results) || !results.length) return null;
+    let synced = results.filter(r => r.syncedLyrics);
+    if (!synced.length) return null;
+
+    // Require the candidate's own title to actually resemble our track's
+    // title before it's even considered — a close duration alone isn't
+    // enough evidence it's the right song.
+    if (expectedTitle){
+      const withTitleMatch = synced.filter(r => titleOverlapScore(expectedTitle, r.trackName || r.name || '') >= 0.5);
+      if (withTitleMatch.length) synced = withTitleMatch;
+      else return null; // nothing plausibly the same song — don't guess
+    }
+
+    if (expectedDuration > 0){
+      let best = null, bestDiff = Infinity;
+      for (const r of synced){
+        const diff = Math.abs((r.duration || 0) - expectedDuration);
+        if (diff < bestDiff){ bestDiff = diff; best = r; }
+      }
+      // Tightened from 3s to 1.5s — even a couple of seconds off usually
+      // means a different edit/remix/reprise, whose line timings then
+      // drift further and further out of sync with our audio as the
+      // song plays (the "highlight doesn't match what's playing" bug).
+      if (best && bestDiff <= 1.5) return best.syncedLyrics;
+      return null;
+    }
+
+    // No known duration to check against — best effort, first result.
+    return synced[0].syncedLyrics;
+  }
+
+  // Basic Devanagari → Hinglish (Roman) transliteration. lrclib returns
+  // lyrics in whatever script the uploader used — usually Devanagari for
+  // Hindi/Punjabi(Gurmukhi-in-Devanagari-transliteration-adjacent) songs —
+  // but the app wants Hinglish only. Character-level scheme (consonant +
+  // matra/halant handling); not linguistically perfect but reads fine for
+  // casual lyric display. Lines with no Devanagari pass through untouched.
+  const DEVANAGARI_RE = /[\u0900-\u097F]/;
+  const HIN_CONSONANTS = {
+    'क':'k','ख':'kh','ग':'g','घ':'gh','ङ':'ng',
+    'च':'ch','छ':'chh','ज':'j','झ':'jh','ञ':'ny',
+    'ट':'t','ठ':'th','ड':'d','ढ':'dh','ण':'n',
+    'त':'t','थ':'th','द':'d','ध':'dh','न':'n',
+    'प':'p','फ':'ph','ब':'b','भ':'bh','म':'m',
+    'य':'y','र':'r','ल':'l','व':'v','ळ':'l',
+    'श':'sh','ष':'sh','स':'s','ह':'h',
+    'क़':'q','ख़':'kh','ग़':'gh','ज़':'z','ड़':'r','ढ़':'rh','फ़':'f','य़':'y'
+  };
+  const HIN_INDEP_VOWELS = {
+    'अ':'a','आ':'aa','इ':'i','ई':'ee','उ':'u','ऊ':'oo','ऋ':'ri',
+    'ए':'e','ऐ':'ai','ओ':'o','औ':'au'
+  };
+  const HIN_MATRAS = {
+    'ा':'a','ि':'i','ी':'ee','ु':'u','ू':'oo','ृ':'ri',
+    'े':'e','ै':'ai','ो':'o','ौ':'au'
+  };
+  function devanagariToHinglish(text){
+    const chars = Array.from(text);
+    const n = chars.length;
+    const NUKTA_VARIANT = { 'क':'q','ख':'kh','ग':'gh','ज':'z','ड':'r','ढ':'rh','फ':'f','य':'y' };
+    let out = '';
+    let i = 0;
+    while (i < n){
+      const ch = chars[i];
+      if (HIN_CONSONANTS[ch] !== undefined){
+        let base = HIN_CONSONANTS[ch];
+        i++;
+        // nukta (़) directly after a base consonant — e.g. ख + ़ = ख़ ("kh"
+        // with the Urdu-origin sound common in Bollywood lyrics like
+        // "ख़्वाब"). Unicode does NOT compose these to a single codepoint
+        // on NFC normalize, so it must be handled as two characters here.
+        if (chars[i] === '़'){
+          if (NUKTA_VARIANT[ch]) base = NUKTA_VARIANT[ch];
+          i++;
+        }
+        const next = chars[i];
+        if (next === '्'){ out += base; i++; }
+        else if (next !== undefined && HIN_MATRAS[next] !== undefined){ out += base + HIN_MATRAS[next]; i++; }
+        else if (next === 'ं'){ out += base + 'an'; i++; }
+        else if (next === 'ः'){ out += base + 'ah'; i++; }
+        else { out += base + 'a'; }
+        continue;
+      }
+      if (HIN_INDEP_VOWELS[ch] !== undefined){ out += HIN_INDEP_VOWELS[ch]; i++; continue; }
+      if (ch === 'ं' || ch === 'ँ'){ out += 'n'; i++; continue; }
+      if (ch === 'ः'){ out += 'h'; i++; continue; }
+      if (ch === '्' || ch === '़'){ i++; continue; }
+      if (ch === '।'){ out += '.'; i++; continue; }
+      if (/[\u0966-\u096F]/.test(ch)){ out += String(ch.charCodeAt(0) - 0x0966); i++; continue; }
+      out += ch; i++;
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  // Same idea for Gurmukhi (Punjabi script) — separate Unicode block, so
+  // it needs its own consonant/vowel-sign map rather than reusing the
+  // Devanagari one.
+  const GURMUKHI_RE = /[\u0A00-\u0A7F]/;
+  const GUR_CONSONANTS = {
+    'ਕ':'k','ਖ':'kh','ਗ':'g','ਘ':'gh','ਙ':'ng',
+    'ਚ':'ch','ਛ':'chh','ਜ':'j','ਝ':'jh','ਞ':'ny',
+    'ਟ':'t','ਠ':'th','ਡ':'d','ਢ':'dh','ਣ':'n',
+    'ਤ':'t','ਥ':'th','ਦ':'d','ਧ':'dh','ਨ':'n',
+    'ਪ':'p','ਫ':'ph','ਬ':'b','ਭ':'bh','ਮ':'m',
+    'ਯ':'y','ਰ':'r','ਲ':'l','ਵ':'v',
+    'ਸ':'s','ਹ':'h','ੜ':'r'
+  };
+  const GUR_INDEP_VOWELS = {
+    'ਅ':'a','ਆ':'aa','ਇ':'i','ਈ':'ee','ਉ':'u','ਊ':'oo',
+    'ਏ':'e','ਐ':'ai','ਓ':'o','ਔ':'au'
+  };
+  const GUR_MATRAS = {
+    'ਾ':'a','ਿ':'i','ੀ':'ee','ੁ':'u','ੂ':'oo',
+    'ੇ':'e','ੈ':'ai','ੋ':'o','ੌ':'au'
+  };
+  const GUR_NUKTA_VARIANT = { 'ਸ':'sh','ਖ':'kh','ਗ':'gh','ਜ':'z','ਫ':'f','ਲ':'l' };
+  function gurmukhiToHinglish(text){
+    const chars = Array.from(text);
+    const n = chars.length;
+    let out = '';
+    let i = 0;
+    while (i < n){
+      const ch = chars[i];
+      if (GUR_CONSONANTS[ch] !== undefined){
+        let base = GUR_CONSONANTS[ch];
+        i++;
+        if (chars[i] === '਼'){ // nukta, U+0A3C — e.g. ਸ+਼ = ਸ਼ ("sh")
+          if (GUR_NUKTA_VARIANT[ch]) base = GUR_NUKTA_VARIANT[ch];
+          i++;
+        }
+        const next = chars[i];
+        if (next !== undefined && GUR_MATRAS[next] !== undefined){ out += base + GUR_MATRAS[next]; i++; }
+        else if (next === 'ਂ' || next === 'ਁ'){ out += base + 'an'; i++; }
+        else { out += base + 'a'; }
+        continue;
+      }
+      if (GUR_INDEP_VOWELS[ch] !== undefined){ out += GUR_INDEP_VOWELS[ch]; i++; continue; }
+      if (ch === 'ਂ' || ch === 'ਁ'){ out += 'n'; i++; continue; }
+      if (ch === '਼' || ch === 'ੱ'){ i++; continue; } // stray nukta/addak (gemination, approximated away)
+      if (ch === '।' || ch === '॥'){ out += '.'; i++; continue; }
+      if (/[\u0A66-\u0A6F]/.test(ch)){ out += String(ch.charCodeAt(0) - 0x0A66); i++; continue; }
+      out += ch; i++;
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  // Urdu (Perso-Arabic script) → Hindi (Devanagari), for the occasional
+  // qawwali/ghazal-style lyric file that comes back in Urdu script.
+  // Arabic script is an abjad — short vowels usually aren't written at
+  // all — so this is necessarily best-effort: explicit long vowels
+  // (ا/و/ی/ے) and diacritics (زبر/زیر/پیش) when present are honoured,
+  // aspirated consonants (ب+ھ=بھ etc.) are recombined, everything else
+  // falls back to the consonant's plain inherent vowel.
+  const URDU_RE = /[\u0600-\u06FF\u0750-\u077F]/;
+  const UR_CONSONANTS = {
+    'ب':'ब','پ':'प','ت':'त','ٹ':'ट','ث':'स',
+    'ج':'ज','چ':'च','ح':'ह','خ':'ख',
+    'د':'द','ڈ':'ड','ذ':'ज़',
+    'ر':'र','ڑ':'ड़','ز':'ज़','ژ':'ज़',
+    'س':'स','ش':'श','ص':'स','ض':'ज़','ط':'त','ظ':'ज़',
+    'غ':'ग़','ف':'फ़','ق':'क़','ک':'क','ك':'क','گ':'ग',
+    'ل':'ल','م':'म','ن':'न','ہ':'ह','ه':'ह'
+  };
+  const UR_ASPIRATE = { 'ब':'भ','प':'फ','त':'थ','ट':'ठ','ज':'झ','च':'छ','द':'ध','ड':'ढ','क':'ख','ग':'घ' };
+  function urduToHindi(text){
+    const chars = Array.from(text);
+    const n = chars.length;
+    let out = '';
+    let i = 0;
+    while (i < n){
+      const ch = chars[i];
+
+      if (UR_CONSONANTS[ch] !== undefined){
+        let base = UR_CONSONANTS[ch];
+        i++;
+        if (chars[i] === 'ھ' && UR_ASPIRATE[base]){ base = UR_ASPIRATE[base]; i++; } // aspirated digraph
+        if (chars[i] === '\u0651'){ i++; } // shadda (gemination) — approximated away
+        if (chars[i] === '\u0650'){ out += base + 'ि'; i++; continue; } // kasra
+        if (chars[i] === '\u064F'){ out += base + 'ु'; i++; continue; } // damma
+        if (chars[i] === '\u0652'){ out += base; i++; continue; } // sukun — no vowel
+        if (chars[i] === '\u064E'){ i++; } // fatha — inherent 'a', just consume the mark
+        if (chars[i] === 'ا'){ out += base + 'ा'; i++; continue; }
+        if (chars[i] === 'و'){ out += base + 'ू'; i++; continue; }
+        if (chars[i] === 'ی' || chars[i] === 'ي'){ out += base + 'ी'; i++; continue; }
+        if (chars[i] === 'ے'){ out += base + 'े'; i++; continue; }
+        if (chars[i] === 'ں'){ out += base + 'ं'; i++; continue; }
+        out += base; // bare consonant — Devanagari glyph already implies the inherent vowel
+        continue;
+      }
+
+      if (ch === 'آ'){ out += 'आ'; i++; continue; }
+      if (ch === 'ا'){ out += 'अ'; i++; continue; }
+      if (ch === 'و'){ out += 'व'; i++; continue; }
+      if (ch === 'ی' || ch === 'ي'){ out += 'य'; i++; continue; }
+      if (ch === 'ے'){ out += 'ए'; i++; continue; }
+      if (ch === 'ۂ' || ch === 'ة'){ out += 'ह'; i++; continue; }
+      if (ch === 'ھ'){ out += 'ह'; i++; continue; } // stray aspirate marker
+      if (ch === 'ں'){ out += 'ं'; i++; continue; }
+      if (ch === 'ع' || ch === 'ء' || ch === 'ئ' || ch === 'ؤ'){ i++; continue; } // silent glottal marks
+      if (ch === '\u064E' || ch === '\u0650' || ch === '\u064F' || ch === '\u0651' || ch === '\u0652' || ch === '\u064B' || ch === '\u064C' || ch === '\u064D'){ i++; continue; } // stray harakat
+      if (ch === '،'){ out += ','; i++; continue; }
+      if (ch === '؟'){ out += '?'; i++; continue; }
+      if (ch === '۔'){ out += '.'; i++; continue; }
+      if (/[\u0660-\u0669\u06F0-\u06F9]/.test(ch)){
+        const code = ch.charCodeAt(0);
+        out += String(code >= 0x06F0 ? code - 0x06F0 : code - 0x0660);
+        i++; continue;
+      }
+      out += ch; i++;
+    }
+    return out.replace(/\s+/g, ' ').trim();
+  }
+
+  function toHinglish(text){
+    // Gurmukhi (Punjabi) → Hinglish (Roman), Urdu script → Hindi
+    // (Devanagari). Devanagari lyrics are shown as-is, in their original
+    // script.
+    if (GURMUKHI_RE.test(text)) return gurmukhiToHinglish(text);
+    if (URDU_RE.test(text)) return urduToHindi(text);
+    return text;
+  }
+
+  async function fetchLyrics(artist, track, durationSeconds){
+    try {
+      const synced = await lrclibSearch(`${artist} ${track}`.trim(), durationSeconds);
+      if (synced) return parseLRC(synced).map(l => ({ time: l.time, text: toHinglish(l.text) }));
+    } catch(e){ console.warn('[lyrics] search failed', artist, track, e); }
+    try {
+      let url = `https://lrclib.net/api/get?artist_name=${encodeURIComponent(artist)}&track_name=${encodeURIComponent(track)}`;
+      if (durationSeconds > 0) url += `&duration=${Math.round(durationSeconds)}`;
+      const res = await fetchWithTimeout(url, 6000);
+      if (!res.ok) { console.warn('[lyrics] get failed', artist, track, res.status); return null; }
+      const data = await res.json();
+      if (!data.syncedLyrics) return null;
+      return parseLRC(data.syncedLyrics).map(l => ({ time: l.time, text: toHinglish(l.text) }));
+    } catch(e){ console.warn('[lyrics] get errored', artist, track, e); return null; }
+  }
+
+  function decodeEntities(str){
+    if (!str) return str;
+    const el = document.createElement('textarea');
+    el.innerHTML = str;
+    return el.value;
+  }
+
+  function bestImage(images){
+    if (!Array.isArray(images) || !images.length) return '';
+    const url = images[images.length - 1].url || images[images.length - 1].link || '';
+    return upgradeImageQuality(url);
+  }
+
+  // JioSaavn's own "highest" entry in the images array is still often only
+  // 500x500. The CDN actually serves larger crops at the same path if you
+  // swap the size token in the URL, so force it up for a genuinely HD
+  // (not just "biggest available in the array") background/artwork.
+  function upgradeImageQuality(url){
+    if (!url) return url;
+    return url.replace(/\b(50x50|150x150|500x500)\b/, '500x500');
+  }
+
+  function bestAudioUrl(downloadUrls){
+    if (!Array.isArray(downloadUrls) || !downloadUrls.length) return null;
+    // prefer 320kbps explicitly, else fall back to whatever the last (highest) entry is
+    const hq = downloadUrls.find(d => d.quality === '320kbps');
+    return (hq && hq.url) || downloadUrls[downloadUrls.length - 1].url || null;
+  }
+
+  // Session-wide dedup key: title+artist, normalized — NOT the raw API id.
+  // Different JioSaavn mirror hosts can return a different numeric/string id
+  // for the exact same recording, so id-only dedup let true duplicates slip
+  // through and show up again a few swipes later. This persists across every
+  // fetchQueue call (initial load + every loadMore), not just one batch.
+  // Persisted (not just in-memory) so that if the browser discards/reloads
+  // this tab after the screen locks for a while — very common on mobile —
+  // the anti-repeat memory survives the reload instead of starting empty,
+  // which was why already-played songs came back right after unlocking.
+  const LS_SEEN = 'vibe_seen_keys';
+  const seenTrackKeys = new Set(getLS(LS_SEEN, []));
+  function persistSeenKeys(){
+    const arr = Array.from(seenTrackKeys);
+    setLS(LS_SEEN, arr.length > 400 ? arr.slice(arr.length - 400) : arr);
+  }
+  function rawTrackKey(raw){
+    const title = (raw.name || '').toLowerCase();
+    const artistList = (raw.artists && raw.artists.primary) || [];
+    const artist = (artistList.map(a => a.name).join(',') || raw.primaryArtists || '').toLowerCase();
+    return `${title}::${artist}`.replace(/[^a-z0-9:,]+/g, ' ').replace(/\s+/g, ' ').trim();
+  }
+
+  // When JioSaavn has no artwork for a track, fall back to something that
+  // still varies per song (colour + initial, hashed from the title/id)
+  // instead of the same generic placeholder image for every such track —
+  // that repeated placeholder was the "same wallpaper on many songs" bug.
+  const FALLBACK_PALETTE = ['4c1d95','1e3a8a','7c2d12','134e4a','831843','1e293b','78350f','064e3b','581c87','7f1d1d'];
+  function fallbackArtwork(title, id){
+    const seed = String(id || title || 'x');
+    let hash = 0;
+    for (let i = 0; i < seed.length; i++){ hash = (hash * 31 + seed.charCodeAt(i)) >>> 0; }
+    const color = FALLBACK_PALETTE[hash % FALLBACK_PALETTE.length];
+    const letter = encodeURIComponent((title || '♫').trim().charAt(0).toUpperCase() || '♫');
+    return `https://placehold.co/600x600/${color}/fff?text=${letter}`;
+  }
+
+  async function prepareSong(raw){
+    const id = String(raw.id || (raw.name + Math.random()));
+    const title = decodeEntities(raw.name) || 'Unknown Title';
+    const artistList = (raw.artists && raw.artists.primary) || [];
+    const artistNames = artistList.map(a => decodeEntities(a.name)).filter(Boolean);
+    const artist = artistNames.join(', ') || decodeEntities(raw.primaryArtists || '') || 'Unknown Artist';
+    const artwork = bestImage(raw.image) || fallbackArtwork(title, id);
+    const audioUrl = bestAudioUrl(raw.downloadUrl);
+    const durationSeconds = Number(raw.duration) || 0;
+    const language = raw.language ? decodeEntities(raw.language) : '';
+
+    const lyrics = await fetchLyrics(artist, title, durationSeconds);
+
+    return {
+      id, title, artist, artistList: artistNames, language, artwork, audioUrl, lyrics,
+      album: decodeEntities(raw.album && raw.album.name || ''), raw
+    };
+  }
+
+  // Lightweight version for populating search/browse result lists fast —
+  // skips the lyrics fetch (which only matters once a track is actually
+  // played). The full prepareSong() runs on-demand when the user taps a result.
+  function prepareLiteSong(raw){
+    const title = decodeEntities(raw.name) || 'Unknown Title';
+    const artistList = (raw.artists && raw.artists.primary) || [];
+    const artist = decodeEntities(artistList.map(a => a.name).join(', ') || raw.primaryArtists || 'Unknown Artist');
+    const artwork = bestImage(raw.image) || fallbackArtwork(title, raw.id);
+    return { raw, title, artist, artwork, album: decodeEntities(raw.album && raw.album.name || '') };
+  }
+
+  // Much wider term pool than before (was only 5) — a small pool meant the
+  // same handful of top search hits kept resurfacing after a few swipes.
+  // Bollywood/Punjabi/Haryanvi only — matches the app's language scope.
+  const SEARCH_TERMS = [
+    'Arijit Singh Hits', 'Trending Hindi Songs', 'Bollywood Romantic 2025', 'Pritam Hits', 'Latest Punjabi Hits',
+    'Shreya Ghoshal Hits', 'Neha Kakkar Hits', 'Sonu Nigam Hits', 'Jubin Nautiyal Hits', 'Diljit Dosanjh Hits',
+    'B Praak Hits', 'AP Dhillon Hits', 'Armaan Malik Hits', 'Atif Aslam Hits', 'Old Bollywood Classics',
+    'Sufi Bollywood Songs', 'Bollywood Party Songs', 'Bollywood Sad Songs', 'Punjabi Wedding Songs', 'Guru Randhawa Hits',
+    'Bollywood 90s Hits', 'KK Hits', 'Rahat Fateh Ali Khan Hits', 'Badshah Hits', 'Yo Yo Honey Singh Hits',
+    'Haryanvi Hits', 'Haryanvi DJ Songs', 'Haryanvi Dance Songs', 'Masoom Sharma Hits', 'Renuka Panwar Hits'
+  ];
+
+  // These terms are kept SEPARATE from the main pool and only spliced in
+  // occasionally with a minimum gap (see songsSinceReels below) — folding
+  // them into the main pool let a single fetch batch return several of
+  // them at once, which read as "the same trending songs clustering
+  // together" during a swipe session instead of appearing every so often.
+  const REELS_TERMS = [
+    'Instagram Trending Songs', 'Trending Reels Songs', 'Viral Reel Audio Hindi',
+    'Instagram Reels Hits', 'Trending Reels India', 'Viral Instagram Audio'
+  ];
+  const REELS_TERM_SET = new Set(REELS_TERMS);
+  const MIN_GAP_BETWEEN_REELS = 5; // at least this many normal songs between reels-pool songs
+  let songsSinceReels = MIN_GAP_BETWEEN_REELS; // allow one near the start
+
+  // Only these languages belong in the app — anything else JioSaavn's
+  // fuzzy text search occasionally surfaces (Tamil, Telugu, English, etc.)
+  // gets filtered out.
+  const ALLOWED_LANGS = new Set(['hindi', 'punjabi', 'haryanvi']);
+  function isAllowedLanguage(raw){
+    const lang = (raw.language || '').toLowerCase().trim();
+    return ALLOWED_LANGS.has(lang);
+  }
+
+  async function fetchQueue(count){
+    // Query several distinct terms in parallel and merge — guards against
+    // any single term returning too few unique tracks. Occasionally swap
+    // one normal term for a reels term, respecting the minimum gap.
+    const shuffledMain = [...SEARCH_TERMS].sort(() => Math.random() - 0.5).slice(0, 4);
+    let termPlan = shuffledMain.map(t => ({ term: t, reels: false }));
+    if (songsSinceReels >= MIN_GAP_BETWEEN_REELS){
+      const reelsTerm = REELS_TERMS[Math.floor(Math.random() * REELS_TERMS.length)];
+      termPlan[Math.floor(Math.random() * termPlan.length)] = { term: reelsTerm, reels: true };
+    }
+
+    const batches = await Promise.all(termPlan.map(async ({ term, reels }) => {
+      const items = await fetchSaavnBatch(term, count + 6);
+      return items.map(raw => ({ raw, reels }));
+    }));
+    const flat = batches.flat().filter(item => isAllowedLanguage(item.raw));
+
+    // dedupe against this session's full history + within this batch, then shuffle
+    const localKeys = new Set();
+    const unique = flat.filter(item => {
+      const r = item.raw;
+      if (!r.id) return false;
+      const key = rawTrackKey(r);
+      if (!key || localKeys.has(key) || seenTrackKeys.has(key)) return false;
+      localKeys.add(key);
+      return true;
+    });
+    for (let i = unique.length - 1; i > 0; i--){
+      const j = Math.floor(Math.random()*(i+1));
+      [unique[i], unique[j]] = [unique[j], unique[i]];
+    }
+    // Spread out same-album tracks so the artwork ("wallpaper") behind
+    // back-to-back cards doesn't repeat just because two different songs
+    // happen to be from the same movie/soundtrack.
+    const albumOf = (item) => (item.raw.album && item.raw.album.name) || '';
+    for (let i = 1; i < unique.length; i++){
+      if (albumOf(unique[i]) && albumOf(unique[i]) === albumOf(unique[i-1])){
+        for (let j = i+1; j < unique.length; j++){
+          if (albumOf(unique[j]) !== albumOf(unique[i-1])){
+            [unique[i], unique[j]] = [unique[j], unique[i]];
+            break;
+          }
+        }
+      }
+    }
+    // Also guard the seam against whatever song is already last in the feed.
+    if (songs.length && unique.length){
+      const lastAlbum = songs[songs.length-1].album || '';
+      if (lastAlbum && albumOf(unique[0]) === lastAlbum){
+        for (let j = 1; j < unique.length; j++){
+          if (albumOf(unique[j]) !== lastAlbum){
+            [unique[0], unique[j]] = [unique[j], unique[0]];
+            break;
+          }
+        }
+      }
+    }
+
+    // Enforce: at most one reels-pool song per batch, and only once the
+    // minimum gap since the last one has actually elapsed.
+    const chosen = [];
+    let gap = songsSinceReels;
+    let usedReelsThisBatch = false;
+    for (const item of unique){
+      if (chosen.length >= count) break;
+      if (item.reels){
+        if (usedReelsThisBatch || gap < MIN_GAP_BETWEEN_REELS) continue;
+        chosen.push(item);
+        usedReelsThisBatch = true;
+        gap = 0;
+      } else {
+        chosen.push(item);
+        gap++;
+      }
+    }
+    songsSinceReels = gap;
+
+    chosen.forEach(item => seenTrackKeys.add(rawTrackKey(item.raw)));
+    persistSeenKeys();
+    const prepared = await Promise.all(chosen.map(item => prepareSong(item.raw).catch(()=>null)));
+    return prepared.filter(Boolean).filter(s => s.audioUrl);
+  }
+
+  /* ---------------------------------------------------------------------
+   * PLAYER — plain HTML5 <audio>, playing JioSaavn's direct 320kbps MP3 URL
+   * ------------------------------------------------------------------- */
+  let audioEl = null;
+  let mode = 'none'; // 'audio' | 'none'
+  let currentSong = null;
+
+  // MODIFIED: mobile browsers/WebViews block audio.play() until the page
+  // has received a genuine user gesture. startApp() runs automatically with
+  // no tap, so the very first song is silently blocked.
+  // BUGFIX: this used to listen with {once:true} — so if the user's very
+  // first touch on the page landed while the loading screen was still up
+  // (audioEl didn't exist yet), that one "genuine gesture" was consumed for
+  // nothing, and there was no second chance: every later programmatic
+  // .play() call kept getting blocked until the user happened to interact
+  // with something (progress bar / swipe) that itself carried its own
+  // click-driven .play() call. Now the unlock listener stays attached and
+  // retries on every gesture until playback is actually confirmed running.
+  function unlockAudioOnFirstGesture(){
+    let unlocked = false;
+    const tryUnlock = () => {
+      if (unlocked) return;
+      if (audioEl && audioEl.paused){
+        audioEl.play().then(() => {
+          unlocked = true;
+          window.removeEventListener('pointerdown', tryUnlock, true);
+          window.removeEventListener('touchstart', tryUnlock, true);
+          window.removeEventListener('touchend', tryUnlock, true);
+          window.removeEventListener('click', tryUnlock, true);
+        }).catch(()=>{});
+      }
+      // if audioEl doesn't exist yet (still loading) or play() rejects,
+      // keep listening — do NOT remove the listeners.
+    };
+    // BUGFIX: this used to listen on `document` in the (default) bubble
+    // phase. Several controls further down the tree (like/comment/share/
+    // progress-bar) call e.stopPropagation() on their own click handlers,
+    // and depending on exactly where a user's first tap landed, that could
+    // stop the gesture from ever reaching this listener — leaving playback
+    // stuck until the user happened to tap somewhere that doesn't call
+    // stopPropagation. Listening on `window` in the CAPTURE phase means
+    // this always runs first, before the event reaches its target and
+    // before any descendant's stopPropagation() has a chance to fire —
+    // guaranteeing the very first tap anywhere on the page (card, button,
+    // progress bar, wherever) unlocks playback. pointerdown is added as
+    // the primary signal since it fires for touch, mouse, and pen alike.
+    window.addEventListener('pointerdown', tryUnlock, { capture: true, passive: true });
+    window.addEventListener('touchstart', tryUnlock, { capture: true, passive: true });
+    window.addEventListener('touchend', tryUnlock, { capture: true, passive: true });
+    window.addEventListener('click', tryUnlock, true);
+  }
+  unlockAudioOnFirstGesture();
+
+  function stopPlayback(){
+    if (audioEl){ audioEl.pause(); audioEl.removeAttribute('src'); audioEl.load(); audioEl = null; }
+    mode = 'none';
+  }
+
+  function playSong(song){
+    stopPlayback();
+    currentSong = song;
+    if (!song.audioUrl){ mode = 'none'; setPlayIcon(false); return; }
+    mode = 'audio';
+    setBuffering(true);
+    audioEl = new Audio(song.audioUrl);
+    audioEl.preload = 'auto';
+    audioEl.play().catch(()=>{});
+    audioEl.addEventListener('playing', () => setBuffering(false));
+    audioEl.addEventListener('waiting', () => setBuffering(true));
+    audioEl.addEventListener('play', () => { setPlayIcon(true); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
+    audioEl.addEventListener('pause', () => { setPlayIcon(false); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused'; });
+    audioEl.addEventListener('ended', () => {
+      const count = incrementLoop(song.id);
+      logHistory({ id: song.id, title: song.title, artist: song.artist, percent: 100, seconds: Math.round(getDuration()), ts: Date.now(), event: 'full_listen', loop: count });
+      // Auto-advance to the next card instead of looping the same track —
+      // looping on 'ended' was the "songs keep repeating" bug. Real Vibe
+      // moves on to the next song in the feed when one finishes.
+      advanceToNextSong();
+    });
+    audioEl.addEventListener('error', () => { mode = 'none'; setBuffering(false); setPlayIcon(false); });
+    updateMediaSession(song);
+  }
+
+  // MODIFIED: lock-screen / notification media controls, with the song's
+  // artwork set as the MediaSession artwork so Android shows the full album
+  // art behind the lock-screen media widget (the same mechanism Spotify/YT
+  // Music use — a genuine OS wallpaper swap isn't something any app, native
+  // or web, is allowed to trigger).
+  function updateMediaSession(song){
+    if (!('mediaSession' in navigator)) return;
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: song.title || '',
+        artist: song.artist || '',
+        album: song.album || '',
+        artwork: [
+          { src: song.artwork, sizes: '96x96', type: 'image/jpeg' },
+          { src: song.artwork, sizes: '256x256', type: 'image/jpeg' },
+          { src: song.artwork, sizes: '512x512', type: 'image/jpeg' },
+        ]
+      });
+      navigator.mediaSession.setActionHandler('play', () => { if (audioEl) audioEl.play().catch(()=>{}); });
+      navigator.mediaSession.setActionHandler('pause', () => { if (audioEl) audioEl.pause(); });
+      navigator.mediaSession.setActionHandler('previoustrack', () => { if (activeIndex > 0) goToCard(activeIndex - 1); });
+      navigator.mediaSession.setActionHandler('nexttrack', () => advanceToNextSong());
+      navigator.mediaSession.setActionHandler('seekto', (details) => { if (typeof details.seekTime === 'number') seekTo(details.seekTime); });
+    } catch(err){ console.warn('[mediaSession] failed to update', err); }
+  }
+
+  function togglePlayPause(){
+    if (mode === 'audio' && audioEl){
+      if (audioEl.paused) audioEl.play().catch(()=>{}); else audioEl.pause();
+    }
+  }
+
+  function getCurrentTime(){
+    return (mode === 'audio' && audioEl) ? (audioEl.currentTime || 0) : 0;
+  }
+  function getDuration(){
+    return (mode === 'audio' && audioEl) ? (audioEl.duration || 0) : 0;
+  }
+  function seekTo(t){
+    if (mode === 'audio' && audioEl) audioEl.currentTime = t;
+  }
+
+  function setPlayIcon(playing){
+    document.querySelectorAll('.play-indicator').forEach(el => {
+      el.classList.toggle('hidden', playing);
+    });
+  }
+
+  function setBuffering(active){
+    document.querySelectorAll('.buffering-indicator').forEach(el => {
+      el.classList.toggle('hidden', !active);
+    });
+  }
+
+  /* ---------------------------------------------------------------------
+   * FEED / CARD RENDERING
+   * ------------------------------------------------------------------- */
+  const feedEl = document.getElementById('feed');
+  const ambientBg = document.getElementById('ambientBg');
+  let songs = [];
+  let activeIndex = -1;
+  let activeStartTime = 0; // currentTime when card became active, for percent baseline
+  let progressTimer = null;
+  let lastLyricIndex = -1;
+
+  function fmtTime(s){
+    if (!isFinite(s) || s < 0) s = 0;
+    const m = Math.floor(s/60), sec = Math.floor(s%60);
+    return `${m}:${sec.toString().padStart(2,'0')}`;
+  }
+
+  function cardHTML(song, i){
+    const liked = likes.includes(song.id);
+
+    return `
+    <div class="song-card relative w-full snap-start snap-always overflow-hidden" style="height:100dvh;" data-index="${i}" data-id="${song.id}">
+      <!-- album artwork backdrop — clearly recognizable, not abstracted into mush -->
+      <img src="${song.artwork}" loading="eager"
+           onerror="this.onerror=null; this.src='https://placehold.co/600x600/1a1a1f/fff?text=%E2%99%AB';"
+           class="absolute inset-0 w-full h-full object-cover scale-110" alt="" />
+      <!-- dynamic dark gradient overlay — just enough for text contrast, image stays visible -->
+      <div class="absolute inset-0 bg-gradient-to-b from-black/55 via-black/20 to-black/95"></div>
+      <div class="absolute inset-0 bg-black/20"></div>
+
+      <!-- top bar -->
+      <div class="absolute top-0 inset-x-0 z-20 flex items-center justify-between px-4 pt-3 pb-8 bg-gradient-to-b from-black/70 to-transparent">
+        <!-- MODIFIED: chevron now a circular glass icon button with a crisp
+             SVG stroke chevron, instead of a plain text "⌄" glyph. -->
+        <button class="backToMusicBtn w-8 h-8 -ml-1 rounded-full action-glass flex items-center justify-center text-white/90 active:scale-90 transition-transform">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <span class="text-[11px] font-semibold tracking-widest text-white/60 uppercase">For You</span>
+        <span class="w-8"></span>
+      </div>
+
+      <!-- lyrics zone: top of screen. Each line gets its own tight dark
+           scrim (not a full-width banner) so the album art stays visible
+           everywhere except directly behind the text. -->
+      <div class="lyrics-scroll absolute inset-x-0 z-10 flex flex-col items-start justify-start gap-2 pl-6 pr-8 text-left overflow-hidden pointer-events-none" style="top:9%; bottom:56%;">
+        ${song.lyrics && song.lyrics.length ? '' : `<p class="text-white text-base font-semibold">No synced lyrics found for this track.</p>` /* MODIFIED: was text-amber-200/70 (faded gold) — now pure white, no opacity */}
+      </div>
+
+      <!-- play indicator (shown when paused) -->
+      <div class="play-indicator hidden absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <div class="w-16 h-16 rounded-full bg-black/50 flex items-center justify-center">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg>
+        </div>
+      </div>
+
+      <!-- buffering indicator (shown while audio is loading) -->
+      <div class="buffering-indicator hidden absolute inset-0 z-20 flex items-center justify-center pointer-events-none">
+        <div class="spinner"></div>
+      </div>
+
+      <!-- right action bar: frosted-glass circles.
+           MODIFIED: emoji swapped for line-style SVG icons (modern, consistent
+           stroke weight) and circle size reduced 48px -> 38px per user request. -->
+      <div class="absolute right-3 z-30 flex flex-col items-center gap-5" style="bottom:14rem;">
+        <button class="likeBtn flex flex-col items-center gap-1" data-id="${song.id}">
+          <span class="heart w-[46px] h-[46px] flex items-center justify-center">
+            ${liked
+              ? '<svg width="24" height="24" viewBox="0 0 24 24" fill="#FB3958"><path d="M12 21s-6.7-4.3-9.3-8.2C1 10.2 1.6 6.6 4.6 5 7 3.7 9.7 4.5 12 7.2 14.3 4.5 17 3.7 19.4 5c3 1.6 3.6 5.2 1.9 7.8C18.7 16.7 12 21 12 21z"/></svg>'
+              : '<svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.7-4.3-9.3-8.2C1 10.2 1.6 6.6 4.6 5 7 3.7 9.7 4.5 12 7.2 14.3 4.5 17 3.7 19.4 5c3 1.6 3.6 5.2 1.9 7.8C18.7 16.7 12 21 12 21z"/></svg>'}
+          </span>
+          <span class="text-[10px] text-white/70 font-medium">Like</span>
+        </button>
+        <button class="commentBtn flex flex-col items-center gap-1">
+          <span class="w-[46px] h-[46px] flex items-center justify-center">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/></svg>
+          </span>
+          <span class="text-[10px] text-white/70 font-medium">Comment</span>
+        </button>
+        <button class="shareBtn flex flex-col items-center gap-1">
+          <span class="w-[46px] h-[46px] flex items-center justify-center">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="18" cy="5" r="3"/><circle cx="6" cy="12" r="3"/><circle cx="18" cy="19" r="3"/><line x1="8.6" y1="10.6" x2="15.4" y2="6.4"/><line x1="8.6" y1="13.4" x2="15.4" y2="17.6"/></svg>
+          </span>
+          <span class="text-[10px] text-white/70 font-medium">Share</span>
+        </button>
+        <button class="addToPlaylistBtn flex flex-col items-center gap-1">
+          <span class="w-[46px] h-[46px] flex items-center justify-center">
+            <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+          </span>
+          <span class="text-[10px] text-white/70 font-medium">Playlist</span>
+        </button>
+      </div>
+
+      <!-- bottom info panel — solid gradient so lyrics never show through.
+           bottom:3.5rem (not 0) so it sits ABOVE the fixed bottomNav bar —
+           it was rendering underneath the nav before, hiding the progress
+           bar entirely. -->
+      <div class="absolute inset-x-0 z-20 px-4 pt-16 pb-4 bg-gradient-to-t from-black via-black/95 to-transparent" style="bottom:4rem;">
+        <div class="flex items-center gap-2 mb-2">
+          <h2 class="text-xl font-extrabold leading-tight truncate max-w-[65%]">${escapeHTML(song.title)}</h2> <!-- MODIFIED: text-lg/font-bold -> text-xl/font-extrabold to match a bolder title size -->
+          <button class="followBtn flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border ${isFollowing(song.artist) ? 'bg-white/10 border-white/20 text-white/70' : 'bg-white border-white text-black'}" data-artist="${escapeHTML(song.artist)}">${isFollowing(song.artist) ? 'Following' : 'Follow'}</button>
+        </div>
+        <div class="flex flex-wrap gap-1.5 mb-3">
+          ${song.album ? `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="movie" data-value="${escapeHTML(song.album)}">🎬 ${escapeHTML(song.album)}</button>` : ''}
+          ${(song.artistList||[]).slice(0,3).map(a => `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="artist" data-value="${escapeHTML(a)}">🎤 ${escapeHTML(a)}</button>`).join('')}
+          ${song.language ? `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="genre" data-value="${escapeHTML(song.language)}">🎵 ${escapeHTML(song.language.charAt(0).toUpperCase() + song.language.slice(1))}</button>` : ''}
+        </div>
+        <div class="progress-wrap w-full h-1.5 bg-white/15 rounded-full overflow-hidden cursor-pointer">
+          <div class="progress-fill h-full rounded-full" style="width:0%; background:#FB3958;"></div>
+        </div>
+        <div class="flex justify-between mt-1.5 text-[11px] text-white/50">
+          <span class="cur-time">0:00</span>
+          <span class="dur-time">0:00</span>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function escapeHTML(s){
+    return (s||'').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+  }
+
+  function appendSongs(newSongs){
+    const startIdx = songs.length;
+    songs = songs.concat(newSongs);
+    const frag = document.createElement('div');
+    frag.innerHTML = newSongs.map((s,i) => cardHTML(s, startIdx+i)).join('');
+    [...frag.children].forEach(child => feedEl.appendChild(child));
+    wireCard(newSongs, startIdx);
+    observeCards();
+  }
+
+  function wireCard(newSongs, startIdx){
+    newSongs.forEach((song, i) => {
+      const idx = startIdx + i;
+      const card = feedEl.querySelector(`.song-card[data-index="${idx}"]`);
+      if (!card) return;
+
+      card.addEventListener('click', (e) => {
+        if (e.target.closest('.likeBtn, .commentBtn, .shareBtn, .addToPlaylistBtn, .followBtn, .progress-wrap, .browse-chip, .backToMusicBtn')) return;
+        togglePlayPause();
+      });
+
+      card.querySelectorAll('.browse-chip').forEach(chip => {
+        chip.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openBrowse(chip.dataset.type, chip.dataset.value);
+        });
+      });
+
+      card.querySelector('.likeBtn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        const nowLiked = toggleLike(song);
+        const heart = e.currentTarget.querySelector('.heart');
+        heart.innerHTML = nowLiked
+          ? '<svg width="18" height="18" viewBox="0 0 24 24" fill="#FB3958"><path d="M12 21s-6.7-4.3-9.3-8.2C1 10.2 1.6 6.6 4.6 5 7 3.7 9.7 4.5 12 7.2 14.3 4.5 17 3.7 19.4 5c3 1.6 3.6 5.2 1.9 7.8C18.7 16.7 12 21 12 21z"/></svg>'
+          : '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 21s-6.7-4.3-9.3-8.2C1 10.2 1.6 6.6 4.6 5 7 3.7 9.7 4.5 12 7.2 14.3 4.5 17 3.7 19.4 5c3 1.6 3.6 5.2 1.9 7.8C18.7 16.7 12 21 12 21z"/></svg>';
+        heart.classList.remove('heart-pop'); void heart.offsetWidth; heart.classList.add('heart-pop');
+        showToast(nowLiked ? 'Added to Liked Songs' : 'Removed from Liked Songs');
+      });
+
+      card.querySelector('.commentBtn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        showToast('Comments coming soon 💬');
+      });
+
+      card.querySelector('.addToPlaylistBtn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        openPlaylistPicker(song);
+      });
+
+      const followBtn = card.querySelector('.followBtn');
+      if (followBtn){
+        followBtn.addEventListener('click', (e) => {
+          e.stopPropagation();
+          openFollowPicker();
+        });
+      }
+
+      card.querySelector('.shareBtn').addEventListener('click', async (e) => {
+        e.stopPropagation();
+        const shareData = { title: song.title, text: `${song.title} — ${song.artist}`, url: location.href };
+        if (navigator.share) { try { await navigator.share(shareData); } catch(e){} }
+        else { try { await navigator.clipboard.writeText(`${song.title} — ${song.artist}`); showToast('Copied to clipboard'); } catch(e){ showToast('Share unavailable'); } }
+      });
+
+      const progWrap = card.querySelector('.progress-wrap');
+      progWrap.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const rect = progWrap.getBoundingClientRect();
+        const pct = (e.clientX - rect.left) / rect.width;
+        const dur = getDuration();
+        if (dur > 0 && idx === activeIndex) seekTo(pct * dur);
+      });
+    });
+  }
+
+  function showToast(msg){
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.classList.remove('hidden');
+    t.classList.remove('toast'); void t.offsetWidth; t.classList.add('toast');
+    setTimeout(()=> t.classList.add('hidden'), 2000);
+  }
+
+  /* ---------------------------------------------------------------------
+   * SEARCH & BROWSE (by movie/artist/genre)
+   * Reuses the same fetchSaavnBatch() the feed already uses — one search
+   * endpoint, works the same for a typed query or a tapped chip. Results
+   * are prepared "lite" (metadata only) for a fast list; the full song
+   * (with lyrics) is only fetched once the user actually taps to play it,
+   * then it's appended to the feed and the view jumps to it.
+   * ------------------------------------------------------------------- */
+  let searchResultSongs = [];
+  let searchDebounce = null;
+
+  function resultItemHTML(song, idx){
+    return `
+    <button class="result-item w-full flex items-center gap-3 p-2 rounded-xl active:bg-white/10 text-left" data-idx="${idx}">
+      <img src="${song.artwork}" onerror="this.src='https://placehold.co/100x100/1a1a1f/fff?text=%E2%99%AB'" class="w-12 h-12 rounded-lg object-cover flex-shrink-0" loading="lazy" alt="" />
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-semibold truncate">${escapeHTML(song.title)}</p>
+        <p class="text-xs text-white/50 truncate">${escapeHTML(song.artist)}${song.album ? ' · ' + escapeHTML(song.album) : ''}</p>
+      </div>
+      <span class="text-white/30 text-lg flex-shrink-0">▶</span>
+    </button>`;
+  }
+
+  async function runSearch(query, statusLabel){
+    const statusEl = document.getElementById('searchStatus');
+    const resultsEl = document.getElementById('searchResults');
+    if (!query || !query.trim()){
+      resultsEl.innerHTML = '';
+      statusEl.textContent = 'Search for songs, artists, or movies';
+      return;
+    }
+    statusEl.textContent = 'Searching…';
+    resultsEl.innerHTML = '';
+    try {
+      const raw = await fetchSaavnBatch(query.trim(), 20);
+      const allowed = raw.filter(isAllowedLanguage);
+      const seen = new Set();
+      const unique = allowed.filter(r => r.id && !seen.has(r.id) && seen.add(r.id));
+      searchResultSongs = unique.map(prepareLiteSong);
+      if (!searchResultSongs.length){
+        statusEl.textContent = `No results for "${query}"`;
+        return;
+      }
+      statusEl.textContent = statusLabel || `Results for "${query}"`;
+      resultsEl.innerHTML = searchResultSongs.map((s, i) => resultItemHTML(s, i)).join('');
+      resultsEl.querySelectorAll('.result-item').forEach(btn => {
+        btn.addEventListener('click', () => playFromSearch(parseInt(btn.dataset.idx, 10)));
+      });
+    } catch(e){
+      statusEl.textContent = 'Search failed — check your connection and try again';
+    }
+  }
+
+  async function playFromSearch(i){
+    const picked = searchResultSongs[i];
+    if (!picked) return;
+    closeSearchModal();
+    showToast(`Adding "${picked.title}" to your feed…`);
+    const full = await prepareSong(picked.raw).catch(()=>null);
+    if (!full || !full.audioUrl){ showToast('Could not play this track'); return; }
+    seenTrackKeys.add(rawTrackKey(picked.raw));
+    persistSeenKeys();
+    appendSongs([full]);
+    const newIdx = songs.length - 1;
+    switchTab('forYou');
+    requestAnimationFrame(() => goToCard(newIdx, true));
+  }
+
+  function openSearch(){
+    const modal = document.getElementById('searchModal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    document.getElementById('searchInput').value = '';
+    document.getElementById('searchResults').innerHTML = '';
+    document.getElementById('searchStatus').textContent = 'Search for songs, artists, or movies';
+    document.getElementById('searchInput').focus();
+  }
+
+  function openBrowse(type, value){
+    const modal = document.getElementById('searchModal');
+    modal.classList.remove('hidden');
+    modal.classList.add('flex');
+    document.getElementById('searchInput').value = value;
+    const prefix = type === 'movie' ? 'Songs from' : type === 'artist' ? 'More by' : 'More';
+    runSearch(value, `${prefix} "${value}"`);
+  }
+
+  function closeSearchModal(){
+    const modal = document.getElementById('searchModal');
+    modal.classList.add('hidden');
+    modal.classList.remove('flex');
+  }
+
+  document.getElementById('searchBtn').addEventListener('click', openSearch);
+  document.getElementById('closeSearch').addEventListener('click', closeSearchModal);
+  document.getElementById('searchInput').addEventListener('input', (e) => {
+    clearTimeout(searchDebounce);
+    const q = e.target.value;
+    searchDebounce = setTimeout(() => runSearch(q), 400);
+  });
+  document.getElementById('searchInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter'){ clearTimeout(searchDebounce); runSearch(e.target.value); }
+  });
+
+  /* ---------------------------------------------------------------------
+   * INTERSECTION OBSERVER — drives which card is "active"
+   *
+   * A naive "first entry that crosses 60%" approach double-fires during
+   * the scroll-snap settle: as you flick from card A to card B, A's ratio
+   * dips below 0.6 and B's rises above it, but on some devices A can
+   * transiently re-cross 0.6 again before the snap fully settles. That
+   * fired activateCard(A) *after* activateCard(B) had already started
+   * loading B's audio — cancelling B and restarting A, which is exactly
+   * the "new song plays for a moment, then the old one comes back by
+   * itself" bug. Fix: track every card's live ratio, and only commit to
+   * whichever card has the HIGHEST ratio after a short quiet period
+   * (debounce) once the observer stops sending new events — i.e. once
+   * the scroll has actually settled.
+   * ------------------------------------------------------------------- */
+  let io = null;
+  const cardRatios = new Map(); // index -> intersection ratio
+  let activationDebounce = null;
+
+  function observeCards(){
+    if (io) io.disconnect();
+    cardRatios.clear();
+    io = new IntersectionObserver((entries) => {
+      entries.forEach(entry => {
+        const idx = parseInt(entry.target.dataset.index, 10);
+        cardRatios.set(idx, entry.intersectionRatio);
+      });
+      scheduleActivation();
+    }, { threshold: [0, 0.25, 0.5, 0.6, 0.75, 0.9, 1] });
+    document.querySelectorAll('.song-card').forEach(c => io.observe(c));
+  }
+
+  function scheduleActivation(){
+    clearTimeout(activationDebounce);
+    activationDebounce = setTimeout(() => {
+      let bestIdx = activeIndex;
+      let bestRatio = activeIndex >= 0 ? (cardRatios.get(activeIndex) || 0) : -1;
+      cardRatios.forEach((ratio, idx) => {
+        if (ratio > bestRatio){ bestRatio = ratio; bestIdx = idx; }
+      });
+      if (bestIdx !== activeIndex && bestRatio > 0.55){
+        activateCard(bestIdx);
+      }
+    }, 120); // ~120ms of quiet == scroll has settled on a card
+  }
+
+  // Programmatic navigation to a specific card (used by search-jump and
+  // auto-advance-on-end). Disconnects the IntersectionObserver for the
+  // move and calls activateCard directly, then reconnects once settled —
+  // otherwise scrolling past intermediate cards briefly crosses the
+  // observer's activation threshold on each one, which was why a searched
+  // song only started playing after several other cards had flickered by.
+  function goToCard(idx, instant){
+    if (io) io.disconnect();
+    const card = feedEl.querySelector(`.song-card[data-index="${idx}"]`);
+    if (card) card.scrollIntoView({ behavior: instant ? 'auto' : 'smooth', block: 'start' });
+    activateCard(idx);
+    observeCards();
+  }
+
+  async function advanceToNextSong(){
+    const nextIdx = activeIndex + 1;
+    if (nextIdx >= songs.length){
+      await loadMore();
+      if (nextIdx >= songs.length) return; // nothing more to load right now
+    }
+    goToCard(nextIdx);
+  }
+
+  function activateCard(idx){
+    // log exit data for previous card
+    if (activeIndex !== -1 && songs[activeIndex]){
+      const prev = songs[activeIndex];
+      const cur = getCurrentTime();
+      const dur = getDuration();
+      const percent = dur > 0 ? Math.min(100, Math.round((cur/dur)*100)) : 0;
+      logHistory({ id: prev.id, title: prev.title, artist: prev.artist, percent, seconds: Math.round(cur), ts: Date.now(), event: 'swipe_away' });
+    }
+
+    activeIndex = idx;
+    lastLyricIndex = -1;
+    const song = songs[idx];
+    if (!song) return;
+
+    // Preload first: assigning a broken/blocked URL straight to
+    // background-image just silently keeps showing whatever the *previous*
+    // song's art was, which looks like "the image never updates".
+    const preload = new Image();
+    preload.onload = () => { if (activeIndex === idx) ambientBg.style.backgroundImage = `url('${song.artwork}')`; };
+    preload.onerror = () => { console.warn('[artwork] failed to load', song.artwork); };
+    preload.src = song.artwork;
+    setPlayIcon(true);
+    playSong(song);
+
+    // lazy-load more when near the end
+    if (idx >= songs.length - 2) loadMore();
+  }
+
+  /* ---------------------------------------------------------------------
+   * PROGRESS + LYRIC SYNC LOOP
+   * ------------------------------------------------------------------- */
+  function startProgressLoop(){
+    if (progressTimer) clearInterval(progressTimer);
+    progressTimer = setInterval(() => {
+      if (activeIndex === -1) return;
+      const song = songs[activeIndex];
+      if (!song) return;
+      const card = feedEl.querySelector(`.song-card[data-index="${activeIndex}"]`);
+      if (!card) return;
+
+      const cur = getCurrentTime();
+      const dur = getDuration();
+      const pct = dur > 0 ? Math.min(100, (cur/dur)*100) : 0;
+
+      const fill = card.querySelector('.progress-fill');
+      if (fill) fill.style.width = pct + '%';
+      const curEl = card.querySelector('.cur-time');
+      const durEl = card.querySelector('.dur-time');
+      if (curEl) curEl.textContent = fmtTime(cur);
+      if (durEl) durEl.textContent = fmtTime(dur);
+
+      if (song.lyrics && song.lyrics.length){
+        let idx = -1;
+        for (let i=0;i<song.lyrics.length;i++){ if (song.lyrics[i].time <= cur) idx = i; else break; }
+        if (idx !== lastLyricIndex){
+          lastLyricIndex = idx;
+          renderLyricsWindow(card, song, idx);
+        }
+      }
+    }, 250);
+  }
+
+  // Two-line lyrics display: current line highlighted on top, next line
+  // dimmed directly below it — no history stacking, just what's playing
+  // now and what's coming next.
+  function renderLyricsWindow(card, song, idx){
+    const container = card.querySelector('.lyrics-scroll');
+    if (!container || idx < 0) return;
+    const current = song.lyrics[idx];
+    const next = song.lyrics[idx + 1];
+    // truncate keeps each line to a single row (no wrap reading like a
+    // 3rd line). Colour/opacity/blur are controlled entirely by the
+    // .lyric-line / .lyric-line.active CSS rules above (pure white now).
+    let html = `<p class="lyric-line active text-2xl sm:text-3xl leading-snug w-full">${escapeHTML(current.text)}</p>`;
+    if (next){
+      html += `<p class="lyric-line text-lg sm:text-xl leading-snug w-full truncate">${escapeHTML(next.text)}</p>`;
+    }
+    container.innerHTML = html;
+  }
+
+  /* ---------------------------------------------------------------------
+   * STATS MODAL
+   * ------------------------------------------------------------------- */
+  function renderStats(){
+    const body = document.getElementById('statsBody');
+    likes = getLS(LS_LIKES, []);
+    history = getLS(LS_HISTORY, []);
+    loops = getLS(LS_LOOPS, {});
+
+    const totalLoops = Object.values(loops).reduce((a,b)=>a+b,0);
+    const avgPercent = history.length ? Math.round(history.reduce((a,h)=>a+(h.percent||0),0)/history.length) : 0;
+
+    body.innerHTML = `
+      <div class="flex justify-between"><span>Liked songs</span><b>${likes.length}</b></div>
+      <div class="flex justify-between"><span>Tracked plays</span><b>${history.length}</b></div>
+      <div class="flex justify-between"><span>Full loops (replays)</span><b>${totalLoops}</b></div>
+      <div class="flex justify-between"><span>Avg. listen %</span><b>${avgPercent}%</b></div>
+      <hr class="border-white/10 my-2" />
+      <p class="text-white/50 text-xs mb-1">Recent activity</p>
+      ${history.slice(-6).reverse().map(h => `<div class="flex justify-between text-xs text-white/60"><span class="truncate pr-2">${escapeHTML(h.title)}</span><span>${h.percent}%</span></div>`).join('') || '<p class="text-xs text-white/30">No activity yet — keep swiping.</p>'}
+    `;
+  }
+
+  document.getElementById('statsRowBtn').addEventListener('click', () => {
+    renderStats();
+    document.getElementById('statsModal').classList.remove('hidden');
+    document.getElementById('statsModal').classList.add('flex');
+  });
+  document.getElementById('closeStats').addEventListener('click', () => {
+    document.getElementById('statsModal').classList.add('hidden');
+    document.getElementById('statsModal').classList.remove('flex');
+  });
+
+  /* ---------------------------------------------------------------------
+   * LIBRARY — Liked Songs + Playlists (backed by IndexedDB)
+   * ------------------------------------------------------------------- */
+  let libActiveTab = 'liked';
+
+  function libraryRowHTML(snap, opts){
+    opts = opts || {};
+    return `
+      <div class="lib-row flex items-center gap-3 p-2 rounded-xl active:bg-white/10" data-id="${escapeHTML(snap.id)}">
+        <img src="${snap.artwork}" class="w-11 h-11 rounded-lg object-cover flex-shrink-0" loading="lazy" />
+        <div class="flex-1 min-w-0">
+          <p class="text-sm font-semibold truncate">${escapeHTML(snap.title)}</p>
+          <p class="text-xs text-white/50 truncate">${escapeHTML(snap.artist)}</p>
+        </div>
+        ${opts.removeBtn ? `<button class="libRemoveBtn text-white/40 text-lg px-2 flex-shrink-0">×</button>` : ''}
+      </div>`;
+  }
+
+  async function renderLibraryBody(){
+    const body = document.getElementById('libraryBody');
+    document.getElementById('libTabLiked').className = `lib-tab flex-1 py-2 rounded-full text-xs font-semibold ${libActiveTab === 'liked' ? 'bg-white/15' : 'bg-white/5'}`;
+    document.getElementById('libTabPlaylists').className = `lib-tab flex-1 py-2 rounded-full text-xs font-semibold ${libActiveTab === 'playlists' ? 'bg-white/15' : 'bg-white/5'}`;
+
+    if (libActiveTab === 'liked'){
+      body.innerHTML = `<p class="text-xs text-white/30 px-2 py-4">Loading…</p>`;
+      const snaps = await idbGetAll('likedSongs').catch(() => []);
+      snaps.sort((a,b) => (b.addedAt||0) - (a.addedAt||0));
+      if (!snaps.length){ body.innerHTML = `<p class="text-xs text-white/30 px-2 py-6 text-center">No liked songs yet — tap ❤️ on a song to save it here.</p>`; return; }
+      body.innerHTML = snaps.map(s => libraryRowHTML(s, { removeBtn: true })).join('');
+      body.querySelectorAll('.lib-row').forEach(row => {
+        const id = row.dataset.id;
+        const snap = snaps.find(s => s.id === id);
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('.libRemoveBtn')) return;
+          playCollection([snap], snap.title);
+        });
+        row.querySelector('.libRemoveBtn').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await idbDelete('likedSongs', id);
+          const li = likes.indexOf(id);
+          if (li !== -1){ likes.splice(li,1); setLS(LS_LIKES, likes); }
+          renderLibraryBody();
+        });
+      });
+    } else {
+      body.innerHTML = `<p class="text-xs text-white/30 px-2 py-4">Loading…</p>`;
+      const playlists = await idbGetAll('playlists').catch(() => []);
+      playlists.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      if (!playlists.length){ body.innerHTML = `<p class="text-xs text-white/30 px-2 py-6 text-center">No playlists yet — tap ➕ on any song to create one.</p>`; return; }
+      body.innerHTML = playlists.map(pl => `
+        <div class="lib-row flex items-center gap-3 p-2.5 rounded-xl active:bg-white/10" data-id="${escapeHTML(pl.id)}">
+          <span class="w-11 h-11 rounded-lg bg-white/10 flex items-center justify-center text-xl flex-shrink-0">🎧</span>
+          <div class="flex-1 min-w-0">
+            <p class="text-sm font-semibold truncate">${escapeHTML(pl.name)}</p>
+            <p class="text-xs text-white/50 truncate">${pl.songs.length} song${pl.songs.length === 1 ? '' : 's'}</p>
+          </div>
+          <button class="libRemoveBtn text-white/40 text-lg px-2 flex-shrink-0">×</button>
+        </div>`).join('');
+      body.querySelectorAll('.lib-row').forEach(row => {
+        const id = row.dataset.id;
+        const pl = playlists.find(p => p.id === id);
+        row.addEventListener('click', (e) => {
+          if (e.target.closest('.libRemoveBtn')) return;
+          if (!pl.songs.length){ showToast('This playlist is empty'); return; }
+          playCollection(pl.songs, pl.name);
+        });
+        row.querySelector('.libRemoveBtn').addEventListener('click', async (e) => {
+          e.stopPropagation();
+          await deletePlaylist(id);
+          renderLibraryBody();
+        });
+      });
+    }
+  }
+
+  // Loads saved song snapshots into the live feed right after the current
+  // card — reuses the same "insert + instant jump" flow the search feature
+  // uses, so it inherits the same no-flicker jump behaviour.
+  async function playCollection(snapshots, label){
+    closeLibraryModal();
+    showToast(`Loading ${label}…`);
+    const prepared = [];
+    for (const snap of snapshots){
+      if (!snap.raw) continue;
+      const full = await prepareSong(snap.raw).catch(() => null);
+      if (full && full.audioUrl) prepared.push(full);
+    }
+    if (!prepared.length){ showToast('Could not load these songs right now'); return; }
+    prepared.forEach(s => seenTrackKeys.add(rawTrackKey(s.raw)));
+    persistSeenKeys();
+    const insertAt = songs.length;
+    appendSongs(prepared);
+    requestAnimationFrame(() => goToCard(insertAt, true));
+  }
+
+  function openLibraryModal(){
+    document.getElementById('libraryModal').classList.remove('hidden');
+    document.getElementById('libraryModal').classList.add('flex');
+    renderLibraryBody();
+  }
+  function closeLibraryModal(){
+    document.getElementById('libraryModal').classList.add('hidden');
+    document.getElementById('libraryModal').classList.remove('flex');
+  }
+  document.getElementById('libraryBtn').addEventListener('click', openLibraryModal);
+  document.getElementById('closeLibrary').addEventListener('click', closeLibraryModal);
+  document.getElementById('libTabLiked').addEventListener('click', () => { libActiveTab = 'liked'; renderLibraryBody(); });
+  document.getElementById('libTabPlaylists').addEventListener('click', () => { libActiveTab = 'playlists'; renderLibraryBody(); });
+
+  /* ---------------------------------------------------------------------
+   * ADD-TO-PLAYLIST PICKER
+   * ------------------------------------------------------------------- */
+  let pickerSong = null;
+
+  async function renderPlaylistPickerList(){
+    const list = document.getElementById('playlistPickerList');
+    list.innerHTML = `<p class="text-xs text-white/30 px-2 py-3">Loading…</p>`;
+    const playlists = await idbGetAll('playlists').catch(() => []);
+    playlists.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+    if (!playlists.length){ list.innerHTML = `<p class="text-xs text-white/30 px-2 py-3">No playlists yet — create one above.</p>`; return; }
+    list.innerHTML = playlists.map(pl => `
+      <button class="playlistPickBtn w-full flex items-center gap-3 p-2.5 rounded-xl bg-white/5 active:bg-white/15" data-id="${escapeHTML(pl.id)}">
+        <span class="w-9 h-9 rounded-lg bg-white/10 flex items-center justify-center text-lg flex-shrink-0">🎧</span>
+        <span class="flex-1 min-w-0 text-left">
+          <span class="block text-sm font-semibold truncate">${escapeHTML(pl.name)}</span>
+          <span class="block text-xs text-white/50">${pl.songs.length} song${pl.songs.length === 1 ? '' : 's'}</span>
+        </span>
+      </button>`).join('');
+    list.querySelectorAll('.playlistPickBtn').forEach(btn => {
+      btn.addEventListener('click', async () => {
+        if (!pickerSong) return;
+        try {
+          const added = await addSongToPlaylist(btn.dataset.id, pickerSong);
+          showToast(added ? 'Added to playlist' : 'Already in that playlist');
+        } catch(err){
+          showToast('Could not add to playlist — try again');
+        }
+        closePlaylistPicker();
+      });
+    });
+  }
+
+  function openPlaylistPicker(song){
+    pickerSong = song;
+    document.getElementById('playlistPickerModal').classList.remove('hidden');
+    document.getElementById('playlistPickerModal').classList.add('flex');
+    document.getElementById('newPlaylistName').value = '';
+    renderPlaylistPickerList();
+  }
+  function closePlaylistPicker(){
+    document.getElementById('playlistPickerModal').classList.add('hidden');
+    document.getElementById('playlistPickerModal').classList.remove('flex');
+    pickerSong = null;
+  }
+  document.getElementById('closePlaylistPicker').addEventListener('click', closePlaylistPicker);
+  document.getElementById('createPlaylistBtn').addEventListener('click', async () => {
+    const nameInput = document.getElementById('newPlaylistName');
+    const name = nameInput.value.trim();
+    if (!name){ showToast('Enter a playlist name'); return; }
+    try {
+      const pl = await createPlaylist(name);
+      if (pickerSong) await addSongToPlaylist(pl.id, pickerSong);
+      nameInput.value = '';
+      showToast(`Created "${pl.name}"` + (pickerSong ? ' and added the song' : ''));
+      closePlaylistPicker();
+    } catch(err){
+      showToast('Could not create playlist — try again');
+    }
+  });
+
+  /* ---------------------------------------------------------------------
+   * FOLLOW-ARTIST PICKER — lets the user pick exactly who to follow,
+   * instead of the follow button only toggling the current song's artist.
+   * Lists every artist seen so far in the feed.
+   * ------------------------------------------------------------------- */
+  function allKnownArtists(){
+    const seen = new Map(); // artist name -> a representative song (for artwork)
+    songs.forEach(s => { if (s.artist && !seen.has(s.artist)) seen.set(s.artist, s); });
+    return Array.from(seen.entries()).map(([artist, s]) => ({ artist, artwork: s.artwork }));
+  }
+
+  function renderFollowPickerList(){
+    const list = document.getElementById('followPickerList');
+    const artists = allKnownArtists();
+    if (!artists.length){ list.innerHTML = `<p class="text-xs text-white/30 px-2 py-3">No artists yet — keep listening and they'll show up here.</p>`; return; }
+    artists.sort((a,b) => a.artist.localeCompare(b.artist));
+    list.innerHTML = artists.map(a => {
+      const following = isFollowing(a.artist);
+      return `
+      <button class="followPickBtn w-full flex items-center gap-3 p-2.5 rounded-xl bg-white/5 active:bg-white/15" data-artist="${escapeHTML(a.artist)}">
+        <img src="${a.artwork}" class="w-9 h-9 rounded-full object-cover flex-shrink-0" loading="lazy" alt="" />
+        <span class="flex-1 min-w-0 text-left text-sm font-semibold truncate">${escapeHTML(a.artist)}</span>
+        <span class="flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border ${following ? 'bg-white/10 border-white/20 text-white/70' : 'bg-white border-white text-black'}">${following ? 'Following' : 'Follow'}</span>
+      </button>`;
+    }).join('');
+    list.querySelectorAll('.followPickBtn').forEach(btn => {
+      btn.addEventListener('click', () => {
+        const artist = btn.dataset.artist;
+        const nowFollowing = toggleFollow(artist);
+        syncFollowButtons(artist, nowFollowing);
+        renderFollowPickerList();
+      });
+    });
+  }
+
+  // Keeps every visible song-card's follow button (same artist) in sync
+  // after a change made from the picker.
+  function syncFollowButtons(artist, nowFollowing){
+    document.querySelectorAll(`.followBtn[data-artist="${CSS.escape(artist)}"]`).forEach(btn => {
+      btn.textContent = nowFollowing ? 'Following' : 'Follow';
+      btn.className = `followBtn flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border ${nowFollowing ? 'bg-white/10 border-white/20 text-white/70' : 'bg-white border-white text-black'}`;
+    });
+  }
+
+  function openFollowPicker(){
+    document.getElementById('followPickerModal').classList.remove('hidden');
+    document.getElementById('followPickerModal').classList.add('flex');
+    renderFollowPickerList();
+  }
+  function closeFollowPicker(){
+    document.getElementById('followPickerModal').classList.add('hidden');
+    document.getElementById('followPickerModal').classList.remove('flex');
+    if (meActiveTab === 'following' && document.getElementById('tabMe') && !document.getElementById('tabMe').classList.contains('hidden')) renderMeBody();
+  }
+  document.getElementById('closeFollowPicker').addEventListener('click', closeFollowPicker);
+
+  /* ---------------------------------------------------------------------
+   * BOTTOM-NAV TAB SHELL (Music / For You / Search / Me) — the rest of the
+   * app around the swipeable lyrics feed, which stays exactly as-is and
+   * now lives inside the "For You" tab.
+   * ------------------------------------------------------------------- */
+  const TAB_IDS = { music: 'tabMusic', forYou: 'tabForYou', search: 'tabSearchHome', me: 'tabMe' };
+  let currentTab = 'forYou';
+  function switchTab(tab){
+    currentTab = tab;
+    Object.entries(TAB_IDS).forEach(([key, id]) => {
+      document.getElementById(id).classList.toggle('hidden', key !== tab);
+    });
+    document.querySelectorAll('.navTabBtn').forEach(btn => {
+      const active = btn.dataset.tab === tab;
+      btn.classList.toggle('text-[#e6146e]', active);
+      btn.classList.toggle('text-white/45', !active);
+    });
+    // MODIFIED: search + stats + library buttons are permanently hidden now
+    // (search/library reachable via bottom nav tabs, stats moved into Me tab).
+    if (tab === 'music' && !musicHomeLoaded) loadMusicHomeTab();
+    if (tab === 'search' && !searchHomeLoaded) loadSearchHomeTab();
+    if (tab === 'me') renderMeTab();
+  }
+  document.querySelectorAll('.navTabBtn').forEach(btn => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+  // MODIFIED: top-left "⌄" on each feed card → jumps back to Music tab.
+  // Delegated on #app since cards are (re)created dynamically.
+  document.getElementById('app').addEventListener('click', (e) => {
+    if (e.target.closest('.backToMusicBtn')) switchTab('music');
+  });
+
+  // Shared by search results AND the new Music/Search home-tab rows —
+  // fetches a fresh audio URL + lyrics for a lightweight result and drops
+  // it into the live "For You" feed right after the current card.
+  async function playLiteSong(lite){
+    showToast(`Adding "${lite.title}" to your feed…`);
+    const full = await prepareSong(lite.raw).catch(() => null);
+    if (!full || !full.audioUrl){ showToast('Could not play this track'); return; }
+    seenTrackKeys.add(rawTrackKey(lite.raw));
+    persistSeenKeys();
+    appendSongs([full]);
+    const newIdx = songs.length - 1;
+    switchTab('forYou');
+    requestAnimationFrame(() => goToCard(newIdx, true));
+  }
+
+  async function fetchHomeSection(query, limit){
+    try {
+      const raw = await fetchSaavnBatch(query, limit + 5);
+      const allowed = raw.filter(isAllowedLanguage);
+      const seen = new Set();
+      const unique = allowed.filter(r => r.id && !seen.has(r.id) && seen.add(r.id));
+      return unique.slice(0, limit).map(prepareLiteSong);
+    } catch(e){ return []; }
+  }
+
+  /* ---- Music tab ---- */
+  const MOOD_TILES = [
+    { label: "Let's Dance", emoji: '💃', color: 'from-fuchsia-600 to-purple-500', query: 'Bollywood Dance Hits' },
+    { label: 'Cheer Up', emoji: '🎈', color: 'from-pink-500 to-rose-400', query: 'Happy Hindi Songs' },
+    { label: 'Bhojpuri', emoji: '🎤', color: 'from-purple-600 to-indigo-500', query: 'Bhojpuri Hits' },
+    { label: 'Workout', emoji: '🏋️', color: 'from-orange-600 to-red-500', query: 'Hindi Workout Songs' },
+    { label: 'Chill', emoji: '🍧', color: 'from-teal-500 to-cyan-400', query: 'Chill Hindi Songs' },
+    { label: 'Hangout', emoji: '🥂', color: 'from-amber-700 to-orange-600', query: 'Hangout Party Songs' }
+  ];
+  const ARTIST_RADIO_NAMES = ['Arijit Singh','Shreya Ghoshal','Diljit Dosanjh','Jubin Nautiyal','Neha Kakkar','B Praak','AP Dhillon','Sonu Nigam'];
+  const MUSIC_HOME_SECTIONS = [
+    { title: 'Popular Hits', query: 'Bollywood Top Hits' },
+    { title: 'Romantic · Bollywood', query: 'Bollywood Romantic Hits' },
+    { title: 'Punjabi Hits', query: 'Latest Punjabi Hits' }
+  ];
+  function homeRowItemHTML(lite, i){
+    return `<button class="homeRowItem w-full flex items-center gap-3 p-2 rounded-xl active:bg-white/10" data-i="${i}">
+      <img src="${lite.artwork}" class="w-12 h-12 rounded-lg object-cover flex-shrink-0" loading="lazy" />
+      <span class="flex-1 min-w-0 text-left">
+        <span class="block text-sm font-semibold truncate">${escapeHTML(lite.title)}</span>
+        <span class="block text-xs text-white/50 truncate">${escapeHTML(lite.artist)}</span>
+      </span>
+    </button>`;
+  }
+  function renderMoodGrid(){
+    document.getElementById('moodGrid').innerHTML = MOOD_TILES.map(m => `
+      <button class="moodTile text-left p-3 rounded-2xl bg-gradient-to-br ${m.color} aspect-square flex flex-col justify-between" data-query="${escapeHTML(m.query)}">
+        <span class="text-2xl">${m.emoji}</span>
+        <span class="text-xs font-bold leading-tight">${escapeHTML(m.label)}</span>
+      </button>`).join('');
+    document.querySelectorAll('.moodTile').forEach(btn => btn.addEventListener('click', () => openBrowse('genre', btn.dataset.query)));
+  }
+  function renderArtistRadioRow(){
+    document.getElementById('artistRadioRow').innerHTML = ARTIST_RADIO_NAMES.map(name => `
+      <button class="artistRadioTile flex-shrink-0 w-20 text-center" data-name="${escapeHTML(name)}">
+        <div class="w-16 h-16 mx-auto rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center text-xl mb-1.5">🎙️</div>
+        <p class="text-[10px] text-white/70 truncate">${escapeHTML(name)}</p>
+      </button>`).join('');
+    document.querySelectorAll('.artistRadioTile').forEach(btn => btn.addEventListener('click', () => openBrowse('artist', btn.dataset.name)));
+  }
+  let musicHomeLoaded = false;
+  async function loadMusicHomeTab(){
+    musicHomeLoaded = true;
+    renderMoodGrid();
+    renderArtistRadioRow();
+    const container = document.getElementById('musicHomeSections');
+    container.innerHTML = MUSIC_HOME_SECTIONS.map(s => `
+      <p class="text-sm font-bold text-white/80 mb-2.5">${escapeHTML(s.title)}</p>
+      <div class="space-y-1 mb-6" id="homeSection-${s.title.replace(/[^a-zA-Z0-9]/g,'')}"></div>
+    `).join('');
+    for (const s of MUSIC_HOME_SECTIONS){
+      const el = document.getElementById(`homeSection-${s.title.replace(/[^a-zA-Z0-9]/g,'')}`);
+      const lites = await fetchHomeSection(s.query, 5);
+      if (!lites.length){ el.innerHTML = `<p class="text-xs text-white/30 px-2">Couldn't load right now.</p>`; continue; }
+      el.innerHTML = lites.map((l,i) => homeRowItemHTML(l,i)).join('');
+      el.querySelectorAll('.homeRowItem').forEach(btn => btn.addEventListener('click', () => playLiteSong(lites[parseInt(btn.dataset.i,10)])));
+    }
+  }
+  document.getElementById('dailyMixBtn').addEventListener('click', () => openBrowse('genre', 'Bollywood Mix'));
+
+  /* ---- Search tab (browse home) ---- */
+  const GENRE_TILES = [
+    { label: 'Bhojpuri', color: 'from-purple-600 to-fuchsia-500', query: 'Bhojpuri Hits' },
+    { label: 'Bollywood', color: 'from-yellow-500 to-lime-500', query: 'Bollywood Hits' },
+    { label: 'Sad', color: 'from-violet-600 to-purple-400', query: 'Bollywood Sad Songs' },
+    { label: 'Romance', color: 'from-pink-600 to-rose-400', query: 'Bollywood Romantic Hits' },
+    { label: 'Desi Hip-Hop', color: 'from-indigo-700 to-purple-600', query: 'Desi Hip Hop Hits' },
+    { label: 'Chill', color: 'from-teal-500 to-emerald-400', query: 'Chill Hindi Songs' }
+  ];
+  function renderBrowseAllGrid(){
+    document.getElementById('browseAllGrid').innerHTML = GENRE_TILES.map(g => `
+      <button class="genreTile text-left p-4 rounded-2xl bg-gradient-to-br ${g.color} h-20 flex items-end" data-query="${escapeHTML(g.query)}">
+        <span class="text-base font-extrabold">${escapeHTML(g.label)}</span>
+      </button>`).join('');
+    document.querySelectorAll('.genreTile').forEach(btn => btn.addEventListener('click', () => openBrowse('genre', btn.dataset.query)));
+  }
+  let searchHomeLoaded = false;
+  async function loadSearchHomeTab(){
+    searchHomeLoaded = true;
+    renderBrowseAllGrid();
+    const list = document.getElementById('top50List');
+    const lites = await fetchHomeSection('Bollywood Top Hits', 10);
+    if (!lites.length){ list.innerHTML = `<p class="text-xs text-white/30">Couldn't load right now.</p>`; return; }
+    list.innerHTML = lites.map((l,i) => `
+      <button class="top50Item w-full flex items-center gap-3 p-2 rounded-xl active:bg-white/10" data-i="${i}">
+        <span class="w-5 text-center text-sm text-white/40 font-bold flex-shrink-0">${i+1}</span>
+        <img src="${l.artwork}" class="w-12 h-12 rounded-lg object-cover flex-shrink-0" loading="lazy" />
+        <span class="flex-1 min-w-0 text-left">
+          <span class="block text-sm font-semibold truncate">${escapeHTML(l.title)}</span>
+          <span class="block text-xs text-white/50 truncate">${escapeHTML(l.artist)}</span>
+        </span>
+      </button>`).join('');
+    list.querySelectorAll('.top50Item').forEach(btn => btn.addEventListener('click', () => playLiteSong(lites[parseInt(btn.dataset.i,10)])));
+  }
+  document.getElementById('openSearchModalBtn').addEventListener('click', openSearch);
+  document.querySelectorAll('.topChartsBtn').forEach(btn => btn.addEventListener('click', () => openBrowse('genre', btn.dataset.query)));
+
+  /* ---- Me tab (profile) ---- */
+  const LS_USERNAME = 'vibe_username';
+  const LS_AVATAR = 'vibe_avatar';
+  function renderMeName(){
+    document.getElementById('meName').textContent = getLS(LS_USERNAME, 'You');
+  }
+  function renderMeAvatar(){
+    const avatar = getLS(LS_AVATAR, '');
+    const img = document.getElementById('meAvatarImg');
+    const placeholder = document.getElementById('meAvatarPlaceholder');
+    if (avatar){ img.src = avatar; img.classList.remove('hidden'); placeholder.classList.add('hidden'); }
+    else { img.classList.add('hidden'); placeholder.classList.remove('hidden'); }
+  }
+  document.getElementById('meAvatarBtn').addEventListener('click', () => {
+    document.getElementById('meAvatarInput').click();
+  });
+  document.getElementById('meAvatarInput').addEventListener('change', (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try { setLS(LS_AVATAR, reader.result); renderMeAvatar(); }
+      catch(err){ showToast('Could not save photo — try a smaller image'); }
+    };
+    reader.readAsDataURL(file);
+  });
+  document.getElementById('editNameBtn').addEventListener('click', () => {
+    const cur = getLS(LS_USERNAME, 'You');
+    const next = prompt('Your name', cur);
+    if (next && next.trim()){ setLS(LS_USERNAME, next.trim()); renderMeName(); }
+  });
+  let meActiveTab = 'library';
+  document.querySelectorAll('.meTab').forEach(btn => {
+    btn.addEventListener('click', () => {
+      meActiveTab = btn.dataset.tab;
+      document.querySelectorAll('.meTab').forEach(b => {
+        const active = b.dataset.tab === meActiveTab;
+        b.classList.toggle('border-white', active);
+        b.classList.toggle('text-white', active);
+        b.classList.toggle('border-transparent', !active);
+        b.classList.toggle('text-white/40', !active);
+      });
+      renderMeBody();
+    });
+  });
+  async function renderMeBody(){
+    const body = document.getElementById('meBody');
+    if (meActiveTab === 'library'){
+      body.innerHTML = `<p class="text-xs text-white/30 py-4">Loading…</p>`;
+      const playlists = await idbGetAll('playlists').catch(() => []);
+      playlists.sort((a,b) => (b.createdAt||0) - (a.createdAt||0));
+      body.innerHTML = `
+        <div class="flex items-center justify-between mb-3">
+          <p class="font-bold text-sm">My Playlists</p>
+          <button id="meNewPlaylistBtn" class="text-white/60 text-xl leading-none px-2">+</button>
+        </div>
+        ${playlists.length ? playlists.map(pl => `
+          <div class="lib-row flex items-center gap-3 p-2 rounded-xl active:bg-white/10 mb-1" data-id="${escapeHTML(pl.id)}">
+            <span class="w-11 h-11 rounded-lg bg-white/10 flex items-center justify-center text-xl flex-shrink-0">🎧</span>
+            <span class="flex-1 min-w-0"><span class="block text-sm font-semibold truncate">${escapeHTML(pl.name)}</span><span class="block text-xs text-white/50">${pl.songs.length} song${pl.songs.length===1?'':'s'}</span></span>
+          </div>`).join('') : `<p class="text-xs text-white/30 py-3">No playlists yet.</p>`}
+      `;
+      document.getElementById('meNewPlaylistBtn').addEventListener('click', async () => {
+        const name = prompt('Playlist name');
+        if (name && name.trim()){ await createPlaylist(name); renderMeBody(); }
+      });
+      body.querySelectorAll('.lib-row').forEach(row => {
+        const pl = playlists.find(p => p.id === row.dataset.id);
+        row.addEventListener('click', () => { if (pl.songs.length) playCollection(pl.songs, pl.name); else showToast('This playlist is empty'); });
+      });
+    } else if (meActiveTab === 'following'){
+      const artists = allKnownArtists().filter(a => isFollowing(a.artist));
+      body.innerHTML = `
+        <div class="flex items-center justify-between mb-3">
+          <p class="font-bold text-sm">Following</p>
+          <button id="meFindArtistsBtn" class="text-white/60 text-xs font-semibold px-3 py-1 rounded-full bg-white/10">Find artists</button>
+        </div>
+        ${artists.length ? artists.map(a => `
+          <div class="flex items-center gap-3 p-2 rounded-xl mb-1">
+            <img src="${a.artwork}" class="w-11 h-11 rounded-full object-cover flex-shrink-0" loading="lazy" alt="" />
+            <span class="flex-1 min-w-0 text-sm font-semibold truncate">${escapeHTML(a.artist)}</span>
+            <button class="meUnfollowBtn text-xs font-semibold px-3 py-1.5 rounded-full border bg-white/10 border-white/20 text-white/70 flex-shrink-0" data-artist="${escapeHTML(a.artist)}">Following</button>
+          </div>`).join('') : `<p class="text-xs text-white/30 py-3">You're not following any artists yet — tap "Find artists" or the Follow button on a song.</p>`}
+      `;
+      document.getElementById('meFindArtistsBtn').addEventListener('click', () => openFollowPicker());
+      body.querySelectorAll('.meUnfollowBtn').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const nowFollowing = toggleFollow(btn.dataset.artist);
+          syncFollowButtons(btn.dataset.artist, nowFollowing);
+          renderMeBody();
+        });
+      });
+    } else {
+      const recent = history.slice(-30).reverse();
+      body.innerHTML = recent.length ? recent.map((h, i) => `
+        <div class="history-row flex items-center justify-between py-2 border-b border-white/5 text-sm active:bg-white/5 rounded-lg px-1" data-i="${i}">
+          <span class="min-w-0 flex-1 pr-3">
+            <span class="block truncate">${escapeHTML(h.title)}</span>
+            ${h.artist ? `<span class="block text-xs text-white/40 truncate">${escapeHTML(h.artist)}</span>` : ''}
+          </span>
+          <span class="text-xs text-white/40 flex-shrink-0">${h.percent}%</span>
+        </div>`).join('') : `<p class="text-xs text-white/30 py-3">No listening history yet — keep swiping.</p>`;
+      body.querySelectorAll('.history-row').forEach(row => {
+        const h = recent[Number(row.dataset.i)];
+        row.addEventListener('click', () => playFromHistory(h));
+      });
+    }
+  }
+
+  // MODIFIED: history entries only store {id,title,artist,...} (no raw
+  // Saavn track), so tapping one re-searches JioSaavn by title+artist,
+  // prefers an exact id match if found, then plays it via the same
+  // insert-into-feed flow as search/playlists.
+  async function playFromHistory(h){
+    if (!h) return;
+    showToast(`Loading "${h.title}"…`);
+    try {
+      const raw = await fetchSaavnBatch(`${h.title} ${h.artist || ''}`.trim(), 10);
+      const allowed = raw.filter(isAllowedLanguage);
+      const exact = allowed.find(r => r.id === h.id);
+      const pick = exact || allowed[0];
+      if (!pick){ showToast('Could not find this song right now'); return; }
+      const full = await prepareSong(pick).catch(() => null);
+      if (!full || !full.audioUrl){ showToast('Could not play this track'); return; }
+      seenTrackKeys.add(rawTrackKey(pick));
+      persistSeenKeys();
+      const insertAt = songs.length;
+      appendSongs([full]);
+      switchTab('forYou');
+      requestAnimationFrame(() => goToCard(insertAt, true));
+    } catch(e){
+      showToast('Could not play this track');
+    }
+  }
+  function renderMeTab(){ renderMeName(); renderMeAvatar(); renderMeBody(); }
+
+  /* ---------------------------------------------------------------------
+   * LOAD MORE / BOOTSTRAP
+   * ------------------------------------------------------------------- */
+  let loadingMore = false;
+  async function loadMore(){
+    if (loadingMore) return;
+    loadingMore = true;
+    try {
+      const more = await fetchQueue(6);
+      const existingIds = new Set(songs.map(s=>s.id));
+      const filtered = more.filter(s => !existingIds.has(s.id));
+      if (filtered.length) appendSongs(filtered);
+    } finally {
+      loadingMore = false;
+    }
+  }
+
+  window.addEventListener('beforeunload', () => {
+    if (activeIndex !== -1 && songs[activeIndex]){
+      const cur = getCurrentTime(), dur = getDuration();
+      const percent = dur > 0 ? Math.round((cur/dur)*100) : 0;
+      logHistory({ id: songs[activeIndex].id, title: songs[activeIndex].title, artist: songs[activeIndex].artist, percent, seconds: Math.round(cur), ts: Date.now(), event: 'unload' });
+    }
+  });
+
+  // MODIFIED: was a click handler on a "Tap to Start Vibe" button — now
+  // runs automatically as soon as the script loads, so the player opens
+  // directly with no extra tap needed. (Audio itself may still need one
+  // tap to actually start playing on some mobile browsers' autoplay
+  // policy — tapping anywhere on the first card, already wired via
+  // togglePlayPause, covers that.)
+  async function startApp(){
+    const overallTimeout = new Promise((resolve) => setTimeout(() => { lastFetchError = lastFetchError || 'timed out after 40s'; resolve([]); }, 40000));
+    const initial = await Promise.race([fetchQueue(8), overallTimeout]);
+    if (!initial.length){
+      // Figure out WHERE the failure actually is, instead of guessing:
+      // if a known-reachable endpoint (iTunes, used only for this test)
+      // also fails, the device itself has no working network route right
+      // now. If iTunes works but every Piped instance doesn't, those
+      // specific hosts are being blocked (common with some Indian
+      // ISPs/DNS for unofficial YouTube-proxy front-ends) — a VPN or
+      // different network (WiFi vs mobile data, or vice versa) usually
+      // gets past that.
+      let deviceOnline = false;
+      try {
+        const r = await fetchWithTimeout('https://itunes.apple.com/search?term=test&limit=1', 6000);
+        deviceOnline = r.ok;
+      } catch(e){ deviceOnline = false; }
+
+      const diagnosis = deviceOnline
+        ? `Your device is online, but none of 5 independent JioSaavn mirrors — direct or through any of 4 CORS relays — could be reached just now. This is a strong signal that this category of unofficial music API/proxy is blocked on this network, or all of them are down simultaneously. Try mobile data ↔ WiFi, or a VPN, then Retry.`
+        : `Your device doesn't seem to have a working internet connection right now — check your WiFi/mobile data and try again.`;
+      const reason = lastFetchError ? ` (last error: ${lastFetchError})` : '';
+
+      document.getElementById('loadingWrap').innerHTML = `
+        <p class="text-white/50 text-xs max-w-xs">${diagnosis}${reason}</p>
+        <button id="retryBtn" class="mt-4 px-6 py-2 rounded-full glass text-xs font-semibold">Retry</button>
+      `;
+      document.getElementById('retryBtn').addEventListener('click', () => location.reload());
+      return;
+    }
+    appendSongs(initial);
+    document.getElementById('startOverlay').classList.add('hidden');
+    switchTab('forYou');
+    startProgressLoop();
+    activateCard(0);
+  }
+  startApp();
+
+})();
+</script>
+</body>
+</html>
