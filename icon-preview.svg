@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 192 192">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#2E5CFF"/>
+      <stop offset="0.35" stop-color="#8A2BE8"/>
+      <stop offset="0.68" stop-color="#FF2E8A"/>
+      <stop offset="1" stop-color="#FF9A3D"/>
+    </linearGradient>
+    <filter id="glow" x="-60%" y="-60%" width="220%" height="220%">
+      <feGaussianBlur stdDeviation="3" result="blur"/>
+      <feMerge><feMergeNode in="blur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+  <rect width="192" height="192" rx="42" fill="url(#bg)"/>
+  <text x="96" y="106" text-anchor="middle" font-family="Arial, Helvetica, sans-serif" font-weight="800" font-size="52" fill="white" filter="url(#glow)">Vibe</text>
+  <path d="M38 140 C 52 140, 52 120, 62 120 C 72 120, 72 152, 82 152 C 89 152, 89 130, 95 130 C 101 130, 101 148, 107 148 C 115 148, 115 132, 125 132 C 137 132, 137 140, 152 140" fill="none" stroke="white" stroke-width="4" stroke-linecap="round" filter="url(#glow)"/>
+</svg>
