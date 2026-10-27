@@ -108,6 +108,14 @@ ab = replace_once(ab, "    implementation fileTree(include: ['*.jar'], dir: 'lib
 """, 'app build.gradle dependencies')
 write(ab_path, ab)
 
+# 4b) Fresh package id. Some phones keep leftovers of an earlier install of the same id and then
+#     refuse every update with "App not installed". A new id (only the id, nothing else changes)
+#     installs next to anything that is left over.
+ab = read(ab_path)
+ab = replace_once(ab, 'applicationId "com.vibe.music"', 'applicationId "com.ankit.vibeplayer"', 'applicationId')
+write(ab_path, ab)
+print('app id is now com.ankit.vibeplayer')
+
 # 5) more memory for the build ------------------------------------------------------------
 gp_path = os.path.join(ANDROID, 'gradle.properties')
 gp = read(gp_path)
