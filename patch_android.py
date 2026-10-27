@@ -69,6 +69,24 @@ rb = replace_once(rb, 'allprojects {\n    repositories {\n        google()\n    
                   'root build.gradle')
 write(rb_path, rb)
 
+# Same signing key on every build, so a new APK installs OVER the old app (keeps your data).
+# Without this, GitHub makes a brand-new key each time and Android says "App not installed".
+KEYSTORE = os.path.join(ROOT, 'vibe-debug.keystore')
+if os.path.exists(KEYSTORE):
+    SIGNING = """    signingConfigs {
+        debug {
+            storeFile file('../../vibe-debug.keystore')
+            storePassword 'android'
+            keyAlias 'vibe'
+            keyPassword 'android'
+        }
+    }
+"""
+    print('using the fixed signing key (vibe-debug.keystore)')
+else:
+    SIGNING = ''
+    print('WARNING: vibe-debug.keystore not found - the APK will get a random key and cannot update the old app')
+
 # 4) app/build.gradle: libraries + desugaring --------------------------------------------
 ab_path = os.path.join(ANDROID, 'app', 'build.gradle')
 ab = read(ab_path)
@@ -79,7 +97,7 @@ ab = replace_once(ab, '    namespace = "com.vibe.music"\n',
         sourceCompatibility JavaVersion.VERSION_21
         targetCompatibility JavaVersion.VERSION_21
     }
-''', 'app build.gradle compileOptions')
+''' + SIGNING, 'app build.gradle compileOptions')
 ab = replace_once(ab, "    implementation fileTree(include: ['*.jar'], dir: 'libs')\n",
                   """    implementation fileTree(include: ['*.jar'], dir: 'libs')
     implementation 'androidx.media3:media3-exoplayer:1.8.0'
