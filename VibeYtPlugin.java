@@ -25,16 +25,24 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 import com.google.common.util.concurrent.ListenableFuture;
 
 import org.json.JSONObject;
+import org.schabi.newpipe.extractor.Image;
 import org.schabi.newpipe.extractor.InfoItem;
 import org.schabi.newpipe.extractor.ListExtractor;
 import org.schabi.newpipe.extractor.MediaFormat;
 import org.schabi.newpipe.extractor.NewPipe;
 import org.schabi.newpipe.extractor.Page;
 import org.schabi.newpipe.extractor.ServiceList;
+import org.schabi.newpipe.extractor.channel.ChannelInfo;
+import org.schabi.newpipe.extractor.channel.ChannelInfoItem;
+import org.schabi.newpipe.extractor.channel.tabs.ChannelTabInfo;
+import org.schabi.newpipe.extractor.channel.tabs.ChannelTabs;
+import org.schabi.newpipe.extractor.linkhandler.ListLinkHandler;
 import org.schabi.newpipe.extractor.localization.Localization;
+import org.schabi.newpipe.extractor.services.youtube.linkHandler.YoutubeSearchQueryHandlerFactory;
 import org.schabi.newpipe.extractor.search.SearchExtractor;
 import org.schabi.newpipe.extractor.stream.AudioStream;
 import org.schabi.newpipe.extractor.stream.DeliveryMethod;
+import org.schabi.newpipe.extractor.stream.Description;
 import org.schabi.newpipe.extractor.stream.StreamInfo;
 import org.schabi.newpipe.extractor.stream.StreamInfoItem;
 
@@ -42,12 +50,14 @@ import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Consumer;
 
 import okhttp3.OkHttpClient;
@@ -68,7 +78,16 @@ public class VibeYtPlugin extends Plugin {
     private static final class Resolved {
         String url;
         String mime;
+        String title;
+        String uploader;
+        String desc;
         long ts;
+    }
+
+    private static final class ChanCursor {
+        ListLinkHandler tab;
+        Page next;
+        String name;
     }
 
     private static final ConcurrentHashMap<String, Resolved> YT_CACHE = new ConcurrentHashMap<>();
@@ -81,6 +100,8 @@ public class VibeYtPlugin extends Plugin {
             .readTimeout(60, TimeUnit.SECONDS)
             .build();
     private final List<Consumer<MediaController>> waiting = new ArrayList<>();
+    private final ConcurrentHashMap<String, ChanCursor> chanCursors = new ConcurrentHashMap<>();
+    private final AtomicInteger chanSeq = new AtomicInteger();
 
     private MediaController controller;
     private ListenableFuture<MediaController> future;
@@ -432,6 +453,127 @@ public class VibeYtPlugin extends Plugin {
         });
     }
 
+
+    /** channel name + description of a video (the app reads singer / album from it) */
+    @PluginMethod
+    public void meta(final PluginCall call) {
+        final String ytId = call.getString("ytId", "");
+        io.execute(() -> {
+            try {
+                Resolved r = resolveYt(ytId);
+                JSObject o = new JSObject();
+                o.put("title", r.title == null ? "" : r.title);
+                o.put("uploader", r.uploader == null ? "" : r.uploader);
+                String d = r.desc == null ? "" : r.desc;
+                o.put("desc", d.length() > 4000 ? d.substring(0, 4000) : d);
+                call.resolve(o);
+            } catch (Throwable e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        });
+    }
+
+    /** YouTube channel search */
+    @PluginMethod
+    public void searchChannels(final PluginCall call) {
+        final String q = call.getString("q", "");
+        io.execute(() -> {
+            try {
+                ensureNewPipe();
+                SearchExtractor ex = ServiceList.YouTube.getSearchExtractor(
+                        q, Collections.singletonList(YoutubeSearchQueryHandlerFactory.CHANNELS), "");
+                ex.fetchPage();
+                JSArray arr = new JSArray();
+                for (InfoItem it : ex.getInitialPage().getItems()) {
+                    if (!(it instanceof ChannelInfoItem)) continue;
+                    ChannelInfoItem c = (ChannelInfoItem) it;
+                    JSObject o = new JSObject();
+                    o.put("url", c.getUrl());
+                    o.put("name", c.getName());
+                    o.put("subs", c.getSubscriberCount());
+                    List<Image> th = c.getThumbnails();
+                    String thumb = "";
+                    if (th != null && !th.isEmpty()) thumb = th.get(th.size() - 1).getUrl();
+                    o.put("thumb", thumb);
+                    arr.put(o);
+                }
+                JSObject res = new JSObject();
+                res.put("items", arr);
+                call.resolve(res);
+            } catch (Throwable e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        });
+    }
+
+    /** videos of a channel, a page at a time (pass back the returned cursor for the next page) */
+    @PluginMethod
+    public void channelVideos(final PluginCall call) {
+        final String url = call.getString("url", "");
+        final String cursor = call.getString("cursor", "");
+        io.execute(() -> {
+            try {
+                ensureNewPipe();
+                List<InfoItem> items;
+                Page next;
+                ListLinkHandler tab = null;
+                String chName;
+                if (cursor.isEmpty()) {
+                    ChannelInfo ci = ChannelInfo.getInfo(ServiceList.YouTube, url);
+                    for (ListLinkHandler t : ci.getTabs()) {
+                        if (t.getContentFilters().contains(ChannelTabs.VIDEOS)) {
+                            tab = t;
+                            break;
+                        }
+                    }
+                    if (tab == null) throw new Exception("This channel has no videos tab");
+                    ChannelTabInfo ti = ChannelTabInfo.getInfo(ServiceList.YouTube, tab);
+                    items = ti.getRelatedItems();
+                    next = ti.getNextPage();
+                    chName = ci.getName();
+                } else {
+                    ChanCursor cc = chanCursors.get(cursor);
+                    if (cc == null) throw new Exception("List expired, open the channel again");
+                    ListExtractor.InfoItemsPage<InfoItem> pg =
+                            ChannelTabInfo.getMoreItems(ServiceList.YouTube, cc.tab, cc.next);
+                    items = pg.getItems();
+                    next = pg.getNextPage();
+                    tab = cc.tab;
+                    chName = cc.name;
+                }
+                JSArray arr = new JSArray();
+                for (InfoItem it : items) {
+                    if (!(it instanceof StreamInfoItem)) continue;
+                    StreamInfoItem s = (StreamInfoItem) it;
+                    String vid = Uri.parse(s.getUrl()).getQueryParameter("v");
+                    if (vid == null || vid.isEmpty()) continue;
+                    JSObject o = new JSObject();
+                    o.put("id", vid);
+                    o.put("title", s.getName());
+                    o.put("author", chName == null ? "" : chName);
+                    o.put("dur", s.getDuration());
+                    arr.put(o);
+                }
+                JSObject res = new JSObject();
+                res.put("items", arr);
+                String nextId = "";
+                if (next != null) {
+                    if (chanCursors.size() > 80) chanCursors.clear();
+                    nextId = "c" + chanSeq.incrementAndGet();
+                    ChanCursor c = new ChanCursor();
+                    c.tab = tab;
+                    c.next = next;
+                    c.name = chName;
+                    chanCursors.put(nextId, c);
+                }
+                res.put("cursor", nextId);
+                call.resolve(res);
+            } catch (Throwable e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        });
+    }
+
     // ----------------------------------------------------------------- helpers
 
     private static synchronized void ensureNewPipe() {
@@ -464,6 +606,10 @@ public class VibeYtPlugin extends Plugin {
         r.url = best.getContent();
         r.mime = best.getFormat() == null ? "audio/mp4" : best.getFormat().getMimeType();
         r.ts = now;
+        r.title = info.getName() == null ? "" : info.getName();
+        r.uploader = info.getUploaderName() == null ? "" : info.getUploaderName();
+        Description d = info.getDescription();
+        r.desc = (d == null || d.getContent() == null) ? "" : d.getContent();
         YT_CACHE.put(id, r);
         return r;
     }

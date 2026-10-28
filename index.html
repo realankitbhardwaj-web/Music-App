@@ -269,6 +269,12 @@
       <button id="closeSearch" class="w-9 h-9 rounded-full glass flex items-center justify-center text-lg flex-shrink-0">←</button>
       <input id="searchInput" type="text" placeholder="Search songs, artists, movies…" class="flex-1 min-w-0 bg-white/10 border border-white/15 rounded-full px-4 py-2.5 text-sm outline-none focus:border-white/40" />
     </div>
+    <div id="searchFilterRow" class="flex gap-2 px-4 pb-2 flex-shrink-0 overflow-x-auto">
+      <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white text-black" data-f="songs">Songs</button>
+      <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10" data-f="channels">📺 Channel</button>
+      <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10" data-f="singer">🎤 Singer</button>
+      <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10" data-f="movie">🎬 Movie / Album</button>
+    </div>
     <p id="searchStatus" class="px-5 pb-2 text-xs text-white/40 flex-shrink-0">Search for songs, artists, or movies</p>
     <div class="hidden flex items-center gap-2 mx-3 mb-2" id="searchPlayRow">
       <button id="searchPlayAllBtn" class="play-pill self-start flex-shrink-0"><svg width="10" height="10" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg> PLAY</button>
@@ -1092,7 +1098,7 @@
       duration: Number(durationSec) || 0,
       language: '',
       album: { name: ytMovieFromTitle(title) },
-      _yt: { id: videoId, topic }
+      _yt: { id: videoId, topic, channel: String(author || '') }
     };
   }
 
@@ -2053,6 +2059,7 @@
     return {
       id, title, artist, artistList: artistNames, language, artwork, audioUrl, audioExt, ytHost,
       lyrics: null, lyricsLoaded: false, lyricsLoading: false, durationSeconds, lyricsHint,
+      channel: (raw._yt && raw._yt.channel) ? ytCleanArtist(raw._yt.channel) : '',
       album: ytAlbum || decodeEntities(raw.album && raw.album.name || ''), raw
     };
   }
@@ -3158,7 +3165,7 @@
            above and the info panel below — not the whole screen. A soft
            gradient fades its top and bottom edges into the blurred backdrop
            around it instead of a hard cut. -->
-      <div class="art-wrap relative z-10 w-full flex-1 min-h-0 overflow-hidden" style="max-height:52dvh;touch-action:pan-y;">
+      <div class="art-wrap relative z-10 w-full flex-1 min-h-0 overflow-hidden" style="touch-action:pan-y;">
         <!-- CHANGED: the art's top/bottom edges now fade out (mask) into the
              blurred wallpaper behind it, and two frosted strips blur the
              fading edge progressively — no hard cut line any more. -->
@@ -3221,11 +3228,7 @@
           <h2 class="text-xl font-extrabold leading-tight truncate max-w-[65%]">${escapeHTML(song.title)}</h2> <!-- MODIFIED: text-lg/font-bold -> text-xl/font-extrabold to match a bolder title size -->
           <button class="followBtn flex-shrink-0 text-xs font-semibold px-3 py-1.5 rounded-full border ${(song.artistList && song.artistList.length ? song.artistList : [song.artist]).some(isFollowing) ? 'bg-white/10 border-white/20 text-white/70' : 'bg-white border-white text-black'}" data-artists="${escapeHTML(JSON.stringify(song.artistList && song.artistList.length ? song.artistList : [song.artist]))}">${(song.artistList && song.artistList.length ? song.artistList : [song.artist]).some(isFollowing) ? 'Following' : 'Follow'}</button>
         </div>
-        <div class="flex flex-wrap gap-1.5 mb-3">
-          ${song.album ? `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="movie" data-value="${escapeHTML(song.album)}">🎬 ${escapeHTML(song.album)}</button>` : ''}
-          ${(song.artistList||[]).slice(0,3).map(a => `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="artist" data-value="${escapeHTML(a)}">🎤 ${escapeHTML(a)}</button>`).join('')}
-          ${song.language ? `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20" data-type="genre" data-value="${escapeHTML(song.language)}">🎵 ${escapeHTML(song.language.charAt(0).toUpperCase() + song.language.slice(1))}</button>` : ''}
-        </div>
+        <div class="songChips flex flex-wrap gap-1.5 mb-3">${chipsHTML(song)}</div>
         <!-- NEW: shuffle + repeat toggles, sit right above the progress bar -->
         <div class="flex items-center justify-between gap-1 mb-1.5">
           <span></span>
@@ -3248,6 +3251,77 @@
         </div>
       </div>
     </div>`;
+  }
+
+
+  // Chips under the title: movie / album, singers, channel, language.
+  function chipsHTML(song){
+    const chip = (type, icon, val) => `<button class="browse-chip text-[10px] px-2.5 py-1 rounded-full bg-white/10 border border-white/10 active:bg-white/20 max-w-[92%] truncate" data-type="${type}" data-value="${escapeHTML(val)}">${icon} ${escapeHTML(val)}</button>`;
+    const lang = song.language ? song.language.charAt(0).toUpperCase() + song.language.slice(1) : '';
+    return (song.album ? chip('movie', '🎬', song.album) : '')
+         + (song.artistList || []).slice(0, 3).map(a => chip('artist', '🎤', a)).join('')
+         + (song.channel ? chip('channel', '📺', song.channel) : '')
+         + (song.language ? chip('genre', '🎵', lang).replace(`data-value="${escapeHTML(lang)}"`, `data-value="${escapeHTML(song.language)}"`) : '');
+  }
+  function refreshChips(song){
+    const i = songs.indexOf(song);
+    if (i < 0) return;
+    const el = feedEl.querySelector(`.song-card[data-index="${i}"] .songChips`);
+    if (!el) return;
+    el.innerHTML = chipsHTML(song);
+    el.querySelectorAll('.browse-chip').forEach(chip => chip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      openBrowse(chip.dataset.type, chip.dataset.value);
+    }));
+  }
+  // YouTube songs: read singer / album from the video description (auto-generated "Topic" uploads
+  // list "Title · Singer · Singer" and the album; many normal videos have "Singer: …" / "Movie: …").
+  function splitNames(str){
+    return String(str).split(/\s*(?:,|&|\band\b|\bx\b|\bft\.?|\bfeat\.?|\||\/|;)\s*/i)
+      .map(x => x.replace(/[^\p{L}\p{N}\s.'\-]/gu, '').trim())
+      .filter(x => x.length > 1 && x.length < 40).slice(0, 4);
+  }
+  function parseYtDescription(desc){
+    const out = { artists: [], album: '' };
+    const text = String(desc || '').replace(/\r/g, '');
+    if (/Provided to YouTube by/i.test(text)){
+      const lines = text.split('\n').map(l => l.trim());
+      const i = lines.findIndex(l => l.includes(' · '));
+      if (i > -1){
+        out.artists = lines[i].split(' · ').slice(1).map(x => x.trim()).filter(x => x && x.length < 50).slice(0, 4);
+        for (let k = i + 1; k < Math.min(lines.length, i + 6); k++){
+          const l = lines[k];
+          if (!l) continue;
+          if (/^(℗|©|Released on|Composer|Lyricist|Producer|Music|Auto-generated|Artist|Writer|Mixer|Lyrics)/i.test(l)) break;
+          out.album = l.slice(0, 70);
+          break;
+        }
+      }
+    }
+    if (!out.artists.length){
+      const m = text.match(/^\s*(?:singers?|singer\(s\)|vocals?|sung by|artists?)\s*[:\-–—]\s*(.+)$/im);
+      if (m) out.artists = splitNames(m[1]);
+    }
+    if (!out.album){
+      const m = text.match(/^\s*(?:movie|film|album)\s*[:\-–—]\s*(.+)$/im);
+      if (m) out.album = m[1].trim().slice(0, 70);
+    }
+    return out;
+  }
+  async function enrichYtMeta(song){
+    if (!NATIVE || !song || song._metaDone) return;
+    const id = String(song.id || '');
+    if (!id.startsWith('yt_')) return;
+    song._metaDone = true;
+    let m;
+    try { m = await nativeSend('meta', { ytId: id.slice(3) }); } catch(e){ return; }
+    if (!m) return;
+    let changed = false;
+    if (m.uploader && !song.channel){ song.channel = ytCleanArtist(m.uploader); changed = true; }
+    const info = parseYtDescription(m.desc);
+    if (info.artists.length){ song.artistList = info.artists; changed = true; }
+    if (info.album && !song.album){ song.album = info.album; changed = true; }
+    if (changed) refreshChips(song);
   }
 
   function escapeHTML(s){
@@ -3364,6 +3438,132 @@
     </button>`;
   }
 
+
+  /* ---------------------------------------------------------------------
+   * YOUTUBE CHANNELS (NEW, Android app) — "Channels" filter in search: find a channel, open it,
+   * play its videos. A channel chip under a song opens that channel the same way.
+   * ------------------------------------------------------------------- */
+  let searchFilter = 'songs';          // 'songs' | 'channels'
+  let channelBrowseState = null;       // { url, name, cursor, done, loading, seenIds }
+
+  function fmtSubs(n){
+    n = Number(n);
+    if (!isFinite(n) || n < 0) return 'YouTube channel';
+    if (n >= 1e7) return (n / 1e7).toFixed(1).replace(/\.0$/, '') + ' crore subscribers';
+    if (n >= 1e5) return (n / 1e5).toFixed(1).replace(/\.0$/, '') + ' lakh subscribers';
+    if (n >= 1e3) return (n / 1e3).toFixed(1).replace(/\.0$/, '') + 'K subscribers';
+    return n + ' subscribers';
+  }
+  function paintSearchFilter(f){
+    document.querySelectorAll('.searchFilterBtn').forEach(b => {
+      const on = b.dataset.f === f;
+      b.classList.toggle('bg-white', on);
+      b.classList.toggle('text-black', on);
+      b.classList.toggle('bg-white/10', !on);
+    });
+    document.getElementById('searchInput').placeholder =
+        f === 'channels' ? 'Search YouTube channels…'
+      : f === 'singer'   ? 'Search by singer name…'
+      : f === 'movie'    ? 'Search by movie or album name…'
+      : 'Search songs, artists, movies…';
+  }
+  function setSearchFilter(f){
+    searchFilter = f;
+    paintSearchFilter(f);
+    const q = document.getElementById('searchInput').value;
+    runSearch(q);
+  }
+  document.querySelectorAll('.searchFilterBtn').forEach(b => {
+    if (b.dataset.f === 'channels' && !NATIVE){ b.style.display = 'none'; return; }   // channel search needs the Android app
+    b.addEventListener('click', () => setSearchFilter(b.dataset.f));
+  });
+
+  async function runChannelSearch(query){
+    artistBrowseState = null; searchBrowseState = null; channelBrowseState = null;
+    searchResultSongs = [];
+    const statusEl = document.getElementById('searchStatus');
+    const resultsEl = document.getElementById('searchResults');
+    document.getElementById('searchPlayRow').classList.add('hidden');
+    resultsEl.innerHTML = '';
+    if (!query || !query.trim()){ statusEl.textContent = 'Search for a YouTube channel'; return; }
+    statusEl.textContent = 'Searching channels…';
+    try {
+      const r = await nativeSend('searchChannels', { q: query.trim() });
+      if (searchFilter !== 'channels') return;
+      const items = (r && r.items) || [];
+      if (!items.length){ statusEl.textContent = `No channels for "${query}"`; return; }
+      statusEl.textContent = `Channels for "${query}"`;
+      resultsEl.innerHTML = items.map((c, i) => {
+        const th = String(c.thumb || '');
+        const src = th.startsWith('//') ? 'https:' + th : th;
+        return `<button class="channel-item w-full flex items-center gap-3 p-2 rounded-xl active:bg-white/10 text-left" data-i="${i}">
+          <img src="${escapeHTML(src)}" class="w-12 h-12 rounded-full object-cover flex-shrink-0 bg-white/10" onerror="this.style.visibility='hidden'" />
+          <div class="min-w-0 flex-1"><p class="text-sm font-semibold truncate">${escapeHTML(c.name)}</p><p class="text-xs text-white/50 truncate">📺 ${escapeHTML(fmtSubs(c.subs))}</p></div>
+          <span class="text-white/30 text-lg flex-shrink-0">›</span></button>`;
+      }).join('');
+      resultsEl.querySelectorAll('.channel-item').forEach(btn => btn.addEventListener('click', () => {
+        const c = items[Number(btn.dataset.i)];
+        openChannel(c.url, c.name);
+      }));
+    } catch(e){
+      statusEl.textContent = 'Channel search failed — check the internet';
+    }
+  }
+
+  async function openChannel(url, name){
+    artistBrowseState = null; searchBrowseState = null;
+    channelBrowseState = { url, name, cursor: '', done: false, loading: false, seenIds: new Set() };
+    searchResultSongs = [];
+    document.getElementById('searchResults').innerHTML = '';
+    document.getElementById('searchPlayRow').classList.add('hidden');
+    document.getElementById('searchStatus').textContent = `Loading "${name}"…`;
+    await loadMoreChannel();
+    await autoFillUntilScrollable(loadMoreChannel, () => channelBrowseState);
+  }
+
+  async function loadMoreChannel(){
+    const st = channelBrowseState;
+    if (!st || st.loading || st.done) return;
+    st.loading = true;
+    const statusEl = document.getElementById('searchStatus');
+    try {
+      for (let attempts = 0; attempts < 3 && !st.done; attempts++){
+        const r = await nativeSend('channelVideos', { url: st.url, cursor: st.cursor });
+        if (channelBrowseState !== st) return;
+        st.cursor = (r && r.cursor) || '';
+        if (!st.cursor) st.done = true;
+        const raws = ((r && r.items) || [])
+          .filter(x => x.id && (!x.dur || (x.dur >= 45 && x.dur <= 1500)))
+          .map(x => ytMakeRaw(x.id, x.title, x.author || st.name, x.dur));
+        if (appendSearchRows(st, raws)) break;
+      }
+      statusEl.textContent = searchResultSongs.length
+        ? `${searchResultSongs.length}${st.done ? '' : '+'} videos from "${st.name}"`
+        : `No videos found for "${st.name}"`;
+    } catch(e){
+      st.done = true;
+      statusEl.textContent = searchResultSongs.length ? statusEl.textContent : 'Could not open this channel — try again';
+    }
+    st.loading = false;
+  }
+
+  // a 📺 chip under a song: find that channel and open it
+  async function runChannelBrowse(name){
+    searchFilter = 'channels';
+    paintSearchFilter('channels');
+    searchBrowseState = null; artistBrowseState = null; channelBrowseState = null;
+    document.getElementById('searchStatus').textContent = 'Finding channel…';
+    document.getElementById('searchResults').innerHTML = '';
+    document.getElementById('searchPlayRow').classList.add('hidden');
+    try {
+      const r = await nativeSend('searchChannels', { q: name });
+      const items = (r && r.items) || [];
+      const pick = items.find(c => String(c.name).toLowerCase() === String(name).toLowerCase()) || items[0];
+      if (pick){ openChannel(pick.url, pick.name); return; }
+    } catch(e){}
+    runChannelSearch(name);
+  }
+
   let searchBrowseState = null; // {query, page, done, loading, seenIds} — pagination for plain/genre/movie search, mirrors artistBrowseState
 
   // MODIFIED: pagination alone wasn't enough — if the first page (after
@@ -3417,6 +3617,13 @@
   }
 
   async function runSearch(query, statusLabel){
+    if (!statusLabel && searchFilter !== 'songs'){
+      const qq = (query || '').trim();
+      if (searchFilter === 'channels' && NATIVE) return runChannelSearch(query);
+      if (qq && searchFilter === 'singer') return runSearch(qq + ' songs', `Songs by "${qq}"`);
+      if (qq && searchFilter === 'movie') return runSearch(qq + ' movie songs', `Songs from "${qq}"`);
+    }
+    channelBrowseState = null;
     artistBrowseState = null; // plain search — no artist pagination scroll trigger
     searchBrowseState = null;
     const statusEl = document.getElementById('searchStatus');
@@ -3691,11 +3898,16 @@
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     document.getElementById('searchInput').value = value;
+    if (type !== 'channel' && searchFilter !== 'songs'){ searchFilter = 'songs'; paintSearchFilter('songs'); }
     if (type === 'artist'){
       runArtistBrowse(value);
       return;
     }
-    const prefix = type === 'movie' ? 'Songs from' : 'More';
+    if (type === 'channel' && NATIVE){
+      runChannelBrowse(value);
+      return;
+    }
+    const prefix = type === 'movie' ? 'Songs from' : type === 'channel' ? 'From' : 'More';
     runSearch(value, `${prefix} "${value}"`);
   }
 
@@ -3715,6 +3927,7 @@
     searchResultSongs = [];
     artistBrowseState = null;
     searchBrowseState = null;
+    channelBrowseState = null;
     try {
       const ytFirst = getSourcePref() === 'youtube';
       const ytP = ytFirst ? ytSearchTimed(name, 1, 5000) : Promise.resolve([]);
@@ -3785,7 +3998,8 @@
   document.getElementById('searchResults').addEventListener('scroll', (e) => {
     const el = e.currentTarget;
     if (el.scrollTop + el.clientHeight < el.scrollHeight - 400) return;
-    if (artistBrowseState && !artistBrowseState.loading && !artistBrowseState.done) loadMoreArtistSongs();
+    if (channelBrowseState && !channelBrowseState.loading && !channelBrowseState.done) loadMoreChannel();
+    else if (artistBrowseState && !artistBrowseState.loading && !artistBrowseState.done) loadMoreArtistSongs();
     else if (searchBrowseState && !searchBrowseState.loading && !searchBrowseState.done) loadMoreSearchResults();
   });
 
@@ -3956,6 +4170,7 @@
   }
 
   function activateCard(idx){
+    enrichYtMeta(songs[idx]);
     // log exit data for previous card
     if (activeIndex !== -1 && songs[activeIndex] && !suppressSwipeLog){
       const prev = songs[activeIndex];
