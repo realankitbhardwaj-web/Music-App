@@ -1908,6 +1908,74 @@
    * now, on demand, instead of upfront for every song in a fetched batch.
    * Called from playSong() each time a new track becomes active.
    * ------------------------------------------------------------------- */
+
+  // ---- lyrics from YouTube captions (Android app) ---------------------------------------------
+  function ttTime(str){
+    str = String(str || '').trim();
+    let m = str.match(/^(\d+):(\d+):(\d+(?:[.,]\d+)?)$/);
+    if (m) return (+m[1]) * 3600 + (+m[2]) * 60 + parseFloat(m[3].replace(',', '.'));
+    m = str.match(/^(\d+):(\d+(?:[.,]\d+)?)$/);
+    if (m) return (+m[1]) * 60 + parseFloat(m[2].replace(',', '.'));
+    m = str.match(/^(\d+(?:\.\d+)?)s$/);
+    if (m) return parseFloat(m[1]);
+    m = str.match(/^(\d+(?:\.\d+)?)ms$/);
+    if (m) return parseFloat(m[1]) / 1000;
+    const n = parseFloat(str);
+    return isFinite(n) ? n : NaN;
+  }
+  function cleanCaption(t){
+    return String(t || '')
+      .replace(/<[^>]*>/g, ' ')
+      .replace(/\[[^\]]*\]|\([^)]*\)|[♪♫]+/g, ' ')        // [Music] (Applause) ♪
+      .replace(/\s+/g, ' ').trim();
+  }
+  // TTML (YouTube's default caption format) or WebVTT  ->  [{ time, text }]
+  function parseCaptionText(raw){
+    const out = [];
+    const txt = String(raw || '');
+    if (/<tt[\s>]|<p\s/i.test(txt)){
+      let doc;
+      try { doc = new DOMParser().parseFromString(txt, 'text/xml'); } catch(e){ return []; }
+      doc.querySelectorAll('p').forEach(p => {
+        const t = ttTime(p.getAttribute('begin'));
+        if (!isFinite(t)) return;
+        const html = p.innerHTML.replace(/<br\s*\/?>/gi, ' ');
+        const line = cleanCaption(decodeEntities(html));
+        if (line) out.push({ time: t, text: line });
+      });
+    } else {
+      const blocks = txt.replace(/\r/g, '').split(/\n\n+/);
+      for (const b of blocks){
+        const lines = b.split('\n');
+        const i = lines.findIndex(l => l.includes('-->'));
+        if (i < 0) continue;
+        const t = ttTime(lines[i].split('-->')[0].trim());
+        if (!isFinite(t)) continue;
+        const line = cleanCaption(decodeEntities(lines.slice(i + 1).join(' ')));
+        if (line) out.push({ time: t, text: line });
+      }
+    }
+    // rolling / repeated captions: keep one copy of a line that repeats right after itself
+    const res = [];
+    for (const l of out){
+      const prev = res[res.length - 1];
+      if (prev && prev.text.toLowerCase() === l.text.toLowerCase()) continue;
+      res.push(l);
+    }
+    res.sort((a, b) => a.time - b.time);
+    return res;
+  }
+  async function ytCaptionLyrics(song){
+    const vid = song && song.raw && song.raw._yt && song.raw._yt.id;
+    if (!NATIVE || !vid) return null;
+    const r = await Promise.race([nativeSend('captions', { ytId: vid }), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 12000))]);
+    if (!r || !r.text) return null;
+    const lines = parseCaptionText(r.text);
+    if (lines.length < 6) return null;      // too little to be a real lyric track
+    song.lyricsFrom = r.auto ? 'YouTube auto captions' : 'YouTube captions';
+    return lines;
+  }
+
   async function ensureLyricsLoaded(song){
     if (!song || song.lyricsLoaded || song.lyricsLoading) return;
     if (COMPILATION_RE.test(String(song.title || ''))){
@@ -1925,6 +1993,8 @@
         lyr = await fetchLyrics(song.lyricsHint.artist, song.lyricsHint.title, song.lyricsHint.duration || song.durationSeconds || 0, false);
       }
       if (!lyr) lyr = await fetchLyrics(song.artist, song.title, song.durationSeconds || 0, isYT);
+      // NEW: nothing found on the lyrics server -> use the video's own YouTube captions
+      if (!lyr && isYT && NATIVE){ try { lyr = await ytCaptionLyrics(song); } catch(e){ lyr = null; } }
       song.lyrics = lyr;
     } catch(e){
       song.lyrics = null;
@@ -3548,7 +3618,7 @@
   }
 
   // a 📺 chip under a song: find that channel and open it
-  async function runChannelBrowse(name){
+  async function runChannelBrowse(name, isArtist){
     searchFilter = 'channels';
     paintSearchFilter('channels');
     searchBrowseState = null; artistBrowseState = null; channelBrowseState = null;
@@ -3561,6 +3631,7 @@
       const pick = items.find(c => String(c.name).toLowerCase() === String(name).toLowerCase()) || items[0];
       if (pick){ openChannel(pick.url, pick.name); return; }
     } catch(e){}
+    if (isArtist){ searchFilter = 'songs'; paintSearchFilter('songs'); runArtistBrowse(name); return; }
     runChannelSearch(name);
   }
 
@@ -3900,7 +3971,8 @@
     document.getElementById('searchInput').value = value;
     if (type !== 'channel' && searchFilter !== 'songs'){ searchFilter = 'songs'; paintSearchFilter('songs'); }
     if (type === 'artist'){
-      runArtistBrowse(value);
+      if (NATIVE) runChannelBrowse(value, true);     // app: open the artist's YouTube channel
+      else runArtistBrowse(value);
       return;
     }
     if (type === 'channel' && NATIVE){
@@ -5827,13 +5899,17 @@
           <button id="meFindArtistsBtn" class="text-white/60 text-xs font-semibold px-3 py-1 rounded-full bg-white/10">Find artists</button>
         </div>
         ${artists.length ? artists.map(a => `
-          <div class="flex items-center gap-3 p-2 rounded-xl mb-1">
+          <div class="meArtistRow flex items-center gap-3 p-2 rounded-xl mb-1 active:bg-white/10" data-artist="${escapeHTML(a.artist)}">
             <img src="${a.artwork || 'https://placehold.co/100x100/1a1a1f/fff?text=%E2%99%AB'}" onerror="this.onerror=null;this.src='https://placehold.co/100x100/1a1a1f/fff?text=%E2%99%AB';" class="w-11 h-11 rounded-full object-cover flex-shrink-0" loading="lazy" alt="" />
             <span class="flex-1 min-w-0 text-sm font-semibold truncate">${escapeHTML(a.artist)}</span>
             <button class="meUnfollowBtn text-xs font-semibold px-3 py-1.5 rounded-full border bg-white/10 border-white/20 text-white/70 flex-shrink-0" data-artist="${escapeHTML(a.artist)}">Following</button>
           </div>`).join('') : `<p class="text-xs text-white/30 py-3">You're not following any artists yet — tap "Find artists" or the Follow button on a song.</p>`}
       `;
       document.getElementById('meFindArtistsBtn').addEventListener('click', () => openFollowPicker());
+      body.querySelectorAll('.meArtistRow').forEach(row => row.addEventListener('click', (e) => {
+        if (e.target.closest('.meUnfollowBtn')) return;
+        openBrowse('artist', row.dataset.artist);
+      }));
       body.querySelectorAll('.meUnfollowBtn').forEach(btn => {
         btn.addEventListener('click', () => {
           const nowFollowing = toggleFollow(btn.dataset.artist);
