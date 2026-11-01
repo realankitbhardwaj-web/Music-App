@@ -211,6 +211,9 @@ public class VibeYtPlugin extends Plugin {
         public void onPlayerError(PlaybackException error) {
             JSObject o = new JSObject();
             MediaItem mi = controller == null ? null : controller.getCurrentMediaItem();
+            if (mi != null && mi.localConfiguration != null && "vibeyt".equals(mi.localConfiguration.uri.getScheme())) {
+                return;      // a queued song: the player service already moved on to the next one
+            }
             o.put("id", mi == null ? "" : mi.mediaId);
             o.put("message", String.valueOf(error.getMessage()));
             notifyListeners("error", o);
@@ -307,6 +310,11 @@ public class VibeYtPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void syncState(final PluginCall call) {
+        withController(c -> { emitState(); call.resolve(); });
+    }
+
+    @PluginMethod
     public void pause(final PluginCall call) {
         withController(c -> { c.pause(); call.resolve(); });
     }
@@ -352,7 +360,7 @@ public class VibeYtPlugin extends Plugin {
                         JSONObject o = arr.getJSONObject(i);
                         String ytId = o.optString("ytId", "");
                         String url = o.optString("url", "");
-                        if (!ytId.isEmpty()) url = resolveYt(ytId).url;
+                        if (!ytId.isEmpty()) url = "vibeyt://" + ytId;   // looked up by the player when it starts
                         if (url.isEmpty()) continue;
                         list.add(buildItem(o.optString("id", ""), o.optString("title", ""),
                                 o.optString("artist", ""), o.optString("artwork", ""), url));
@@ -523,6 +531,38 @@ public class VibeYtPlugin extends Plugin {
         });
     }
 
+
+    /** main artist of a song, from YouTube Music (the plain YouTube channel is often just a label) */
+    @PluginMethod
+    public void musicMeta(final PluginCall call) {
+        final String q = call.getString("q", "");
+        io.execute(() -> {
+            try {
+                ensureNewPipe();
+                SearchExtractor ex = ServiceList.YouTube.getSearchExtractor(
+                        q, Collections.singletonList(YoutubeSearchQueryHandlerFactory.MUSIC_SONGS), "");
+                ex.fetchPage();
+                JSArray arr = new JSArray();
+                int n = 0;
+                for (InfoItem it : ex.getInitialPage().getItems()) {
+                    if (!(it instanceof StreamInfoItem)) continue;
+                    StreamInfoItem s = (StreamInfoItem) it;
+                    JSObject o = new JSObject();
+                    o.put("title", s.getName());
+                    o.put("artist", s.getUploaderName() == null ? "" : s.getUploaderName());
+                    o.put("dur", s.getDuration());
+                    arr.put(o);
+                    if (++n >= 6) break;
+                }
+                JSObject res = new JSObject();
+                res.put("items", arr);
+                call.resolve(res);
+            } catch (Throwable e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        });
+    }
+
     /** YouTube channel search */
     @PluginMethod
     public void searchChannels(final PluginCall call) {
@@ -633,7 +673,12 @@ public class VibeYtPlugin extends Plugin {
         }
     }
 
-    private Resolved resolveYt(String id) throws Exception {
+    /** used by the player service to turn vibeyt://<id> into a real audio address */
+    static String resolveUrlBlocking(String id) throws Exception {
+        return resolveYt(id).url;
+    }
+
+    private static Resolved resolveYt(String id) throws Exception {
         long now = System.currentTimeMillis();
         Resolved hit = YT_CACHE.get(id);
         if (hit != null && now - hit.ts < YT_TTL_MS) return hit;

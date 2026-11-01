@@ -1255,7 +1255,7 @@
    * the second play of a song is instant, and search results are matched ahead
    * of time (ytWarmBridge) so the first tap is usually instant too.
    * ===================================================================== */
-  const YT_LABEL_RE = /t-?series|music|records?|official|vevo|topic|entertainment|films?|company|productions?|\btips\b|saregama|\bzee\b|sony|\bspeed\b|\byrf\b|\beros\b|lahari|venus|\bwave\b|gaana|\bjio|youtube|studios?|originals?|label|network/i;
+  const YT_LABEL_RE = /t-?series|music|records?|official|vevo|topic|entertainment|films?|company|productions?|\btips\b|saregama|\bzee\b|sony|\bspeed\b|\byrf\b|\beros\b|lahari|venus|\bwave\b|gaana|\bjio|youtube|studios?|originals?|label|network|melodies|hungama|jukebox|\\bmedia\\b|\\bdigital\\b|pictures|\\btv\\b|\\bchannel\\b/i;
   function ytIsLabel(n){ return !n || n === 'Unknown Artist' || YT_LABEL_RE.test(n); }
   const YT_NOISE_RE = /\b(official|video song|full video|full song|full audio|video|audio|lyrical|lyrics|lyric|hd|4k|hq|1080p|720p|music video|remastered|remaster|ft\.?|feat\.?|featuring|with lyrics|english translation|visualizer|visualiser)\b/ig;
   function ytTidy(t){
@@ -2127,7 +2127,7 @@
     const language = ytLang || (raw.language ? decodeEntities(raw.language) : '');
 
     return {
-      id, title, artist, artistList: artistNames, language, artwork, audioUrl, audioExt, ytHost,
+      id, title, artist, artistList: raw._yt ? artistNames.map(n => n.replace(/\s*official\s*$/i, '').trim()).filter(n => n && !ytIsLabel(n)) : artistNames, language, artwork, audioUrl, audioExt, ytHost,
       lyrics: null, lyricsLoaded: false, lyricsLoading: false, durationSeconds, lyricsHint,
       channel: (raw._yt && raw._yt.channel) ? ytCleanArtist(raw._yt.channel) : '',
       album: ytAlbum || decodeEntities(raw.album && raw.album.name || ''), raw
@@ -2316,7 +2316,7 @@
       }
     : null;
   let nativeState = { id: '', playing: false, buffering: false, ended: false, pos: 0, dur: 0, ts: 0 };
-  let nativeAdoptId = null, suppressSwipeLog = false, nativeErrStreak = 0, nativeSyncKey = '';
+  let nativeAdoptId = null, suppressSwipeLog = false, nativeErrStreak = 0, nativeSyncKey = '', nativeGuardUntil = 0;
   if (NATIVE){
     NATIVE.on('state', (st) => applyNativeState(st));
     NATIVE.on('ended', (ev) => onNativeEnded(ev));
@@ -2560,6 +2560,9 @@
     if (!st) return;
     nativeState = { id: st.id || '', playing: !!st.playing, buffering: !!st.buffering, ended: !!st.ended,
                     pos: (st.pos || 0) / 1000, dur: (st.dur || 0) / 1000, ts: Date.now() };
+    if (mode === 'native' && currentSong && nativeState.id && nativeState.id !== currentSong.id && Date.now() > nativeGuardUntil){
+      if (songs.some(sg => sg.id === nativeState.id)){ onNativeTransition({ id: nativeState.id }); return; }
+    }
     if (mode !== 'native' || !currentSong || currentSong.id !== nativeState.id) return;
     setBuffering(nativeState.buffering);
     setPlayIcon(nativeState.playing);
@@ -2582,6 +2585,7 @@
     stopYtKeepAlive();
     currentSong = song;
     if (!adopt){
+      nativeGuardUntil = Date.now() + 6000;
       nativeState = { id: song.id, playing: false, buffering: true, ended: false, pos: 0, dur: 0, ts: Date.now() };
       setBuffering(true); setPlayIcon(false);
       const a = String(song.audioUrl);
@@ -2605,7 +2609,7 @@
     const items = [];
     const noNext = shuffleOn || repeatOn || (typeof sleepTimerEndOfSong !== 'undefined' && sleepTimerEndOfSong);
     if (!noNext){
-      for (let i = activeIndex + 1; i < songs.length && items.length < 3; i++){
+      for (let i = activeIndex + 1; i < songs.length && items.length < 15; i++){
         const sg = songs[i];
         const u = String((sg && sg.audioUrl) || '');
         if (!u || u.startsWith('yt-embed:') || u.startsWith('blob:')) break;
@@ -2622,6 +2626,10 @@
     nativeSend('setQueue', { afterId: currentSong.id, items, repeatOne: !!repeatOn }).catch(() => { nativeSyncKey = ''; });
   }
   if (NATIVE) setInterval(() => nativeSyncQueue(false), 3000);
+  // phone unlocked / app opened again: ask the player what it is playing now and follow it
+  if (NATIVE) document.addEventListener('visibilitychange', () => {
+    if (!document.hidden && mode === 'native') nativeSend('syncState').catch(() => {});
+  });
 
   function onNativeEnded(ev){
     if (mode !== 'native' || !currentSong) return;
@@ -3368,30 +3376,57 @@
         }
       }
     }
+    // labelled fields anywhere: "Singer: A, B", "Singers - A & B | Music: C", "Movie: X", "Album - Y"
     if (!out.artists.length){
-      const m = text.match(/^\s*(?:singers?|singer\(s\)|vocals?|sung by|artists?)\s*[:\-–—]\s*(.+)$/im);
+      const m = text.match(/(?:^|[\n|•·])[ \t]*(?:singers?|singer\(s\)|singer name|vocals?|vocalist|sung by|artists?|voice|playback)[ \t]*[:\-–—=]+[ \t]*([^\n|•·]+)/i);
       if (m) out.artists = splitNames(m[1]);
     }
     if (!out.album){
-      const m = text.match(/^\s*(?:movie|film|album)\s*[:\-–—]\s*(.+)$/im);
+      const m = text.match(/(?:^|[\n|•·])[ \t]*(?:movie|film|album|movie name|film name)[ \t]*[:\-–—=]+[ \t]*([^\n|•·]+)/i);
       if (m) out.album = m[1].trim().slice(0, 70);
     }
+    out.artists = out.artists.filter(n => !ytIsLabel(n));
     return out;
+  }
+  // main artist from YouTube Music: used when neither the channel nor the description names a singer
+  async function ytMusicArtist(song){
+    const base = String(song.title || '').replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!NATIVE || !base) return null;
+    let r;
+    try { r = await Promise.race([nativeSend('musicMeta', { q: base }), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 9000))]); }
+    catch(e){ return null; }
+    const norm = x => String(x || '').toLowerCase().replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean);
+    const want = new Set(norm(base));
+    const dur = song.durationSeconds || 0;
+    let best = null, bestScore = 0;
+    for (const it of ((r && r.items) || [])){
+      const toks = norm(it.title);
+      if (!toks.length || !want.size) continue;
+      const overlap = toks.filter(t => want.has(t)).length / Math.max(toks.length, want.size);
+      const durOk = !dur || !it.dur || Math.abs(it.dur - dur) <= 6;
+      if (overlap >= 0.5 && durOk && overlap > bestScore){ best = it; bestScore = overlap; }
+    }
+    const name = best && String(best.artist || '').trim();
+    return name && !ytIsLabel(name) ? name : null;
   }
   async function enrichYtMeta(song){
     if (!NATIVE || !song || song._metaDone) return;
     const id = String(song.id || '');
     if (!id.startsWith('yt_')) return;
     song._metaDone = true;
-    let m;
-    try { m = await nativeSend('meta', { ytId: id.slice(3) }); } catch(e){ return; }
-    if (!m) return;
+    let m = null;
+    try { m = await nativeSend('meta', { ytId: id.slice(3) }); } catch(e){}
     let changed = false;
-    if (m.uploader && !song.channel){ song.channel = ytCleanArtist(m.uploader); changed = true; }
-    const info = parseYtDescription(m.desc);
+    if (m && m.uploader && !song.channel){ song.channel = ytCleanArtist(m.uploader); changed = true; }
+    const info = parseYtDescription(m && m.desc);
     if (info.artists.length){ song.artistList = info.artists; changed = true; }
     if (info.album && !song.album){ song.album = info.album; changed = true; }
     if (changed) refreshChips(song);
+    // still no singer (the channel is a label and the description says nothing): ask YouTube Music
+    if (!(song.artistList || []).length){
+      const a = await ytMusicArtist(song);
+      if (a){ song.artistList = [a]; refreshChips(song); }
+    }
   }
 
   function escapeHTML(s){
@@ -4231,7 +4266,7 @@
     });
     // Familiar/Fresh toggle: lit only while a Daily Mix in that mode is playing.
     // CHANGED: a tapped chip lights up right away (pendingMixMode) instead of waiting for the first song to load.
-    let mixMode = (song && song._sourceLabel === 'Daily Mix') ? song._dailyMixMode : null;
+    let mixMode = (song && song._sourceLabel === 'Daily Mix') ? song._dailyMixMode : (song ? (song._sourceMode || null) : null);
     if (pendingMixMode) mixMode = pendingMixMode;
     document.querySelectorAll('.dailyMixModeChip').forEach(chip => {
       const on = chip.dataset.mode === mixMode;
@@ -5095,6 +5130,11 @@
     if (chip){
       const mode = chip.dataset.mode;
       const cur = songs[activeIndex];
+      if (cur && cur._sourceLabel && cur._sourceLabel !== 'Daily Mix' && cur._viaDailyMixTab !== true){
+        returnAction = null;
+        applyModeToSource(mode, cur._sourceMode === mode);   // tapping the lit chip again = the list as it was
+        return;
+      }
       const alreadyOn = cur && cur._sourceLabel === 'Daily Mix' && cur._dailyMixMode === mode;
       returnAction = null;
       playYourDailyMix(alreadyOn ? undefined : mode); // tapping the lit chip again = normal mix
@@ -5319,11 +5359,11 @@
 
   // CHANGED: artists are fetched in parallel (it used to be one after another) and
   // onEach(list) fires as soon as each artist answers, so songs can start streaming in.
-  async function fetchArtistPool(names, perArtist, onEach){
+  async function fetchArtistPool(names, perArtist, onEach, pages){
     const out = [];
     await Promise.all(names.map(async name => {
       try {
-        const raw = await fetchSaavnBatch(name, perArtist);
+        const raw = await fetchSaavnBatch(name, perArtist, pages > 1 ? Math.floor(Math.random() * pages) : 0);
         const lite = raw.filter(isAllowedLanguage).map(prepareLiteSong);
         out.push(...lite);
         if (onEach) onEach(lite);
@@ -5339,6 +5379,28 @@
   // CHANGED: streaming. The three buckets now run in parallel and every time some
   // songs are ready they go to onChunk(list) immediately — the mix starts playing
   // from the first chunk and the rest arrives song by song. Returns everything emitted.
+  // What Daily Mix already served (remembered between mixes) so the same songs don't keep coming back.
+  const LS_MIX_SERVED = 'vibe_mix_served';
+  function markMixServed(ids){
+    try {
+      const old = getLS(LS_MIX_SERVED, []);
+      const drop = new Set(ids);
+      setLS(LS_MIX_SERVED, old.filter(i => !drop.has(i)).concat(ids).slice(-500));
+    } catch(e){}
+  }
+  // different searches every time, so "new songs" really are different songs
+  function freshSearchTerms(yr){
+    return {
+      hindi: [`new hindi songs ${yr}`, `latest bollywood songs ${yr}`, 'new bollywood romantic songs', `bollywood new release ${yr}`,
+              'trending hindi songs', 'new hindi sad songs', 'new hindi party songs', 'new hindi songs this week',
+              'viral hindi songs', `new bollywood movie songs ${yr}`],
+      punjabi: [`new punjabi songs ${yr}`, 'latest punjabi songs', `punjabi new release ${yr}`, 'new punjabi romantic songs',
+                'trending punjabi songs', 'new punjabi hits', 'punjabi song this week', 'new punjabi sad songs'],
+      haryanvi: [`new haryanvi songs ${yr}`, 'latest haryanvi songs', 'haryanvi new release', `haryanvi dj songs ${yr}`,
+                 'trending haryanvi songs', 'new haryanvi hits', 'haryanvi song this week']
+    };
+  }
+
   async function buildDailyMixPool(targetSize, mode, onChunk){
     let fFollowed = 0.35, fFamiliar = 0.35;
     if (mode === 'familiar'){ fFollowed = 0.55; fFamiliar = 0.35; } // 10% new
@@ -5354,10 +5416,16 @@
     const likedArtists = [...new Set(likedSnaps.flatMap(artistNamesOf))];
     const playlistArtists = [...new Set(playlists.flatMap(pl => (pl.songs || []).flatMap(artistNamesOf)))];
 
-    const seen = new Set(), all = [];
+    // songs to keep out: Fresh = everything served or played lately, other modes = only the last few mixes
+    const served = getLS(LS_MIX_SERVED, []);
+    const recent = new Set(mode === 'fresh'
+      ? served.concat((history || []).slice(-400).map(h => h && h.id).filter(Boolean))
+      : served.slice(-80));
+
+    const seen = new Set(), all = [], skipped = [];
     const b1 = { left: nFollowed }, b2 = { left: nFamiliar }, b3 = { left: nNew };
-    // takes what still fits in this bucket's quota, drops junk/duplicates, sends it on
-    const emit = (bucket, list, cap) => {
+    // takes what still fits in this bucket's quota, drops junk/duplicates/recent songs, sends it on
+    const emit = (bucket, list, cap, force) => {
       let room = Math.min(bucket.left, cap || bucket.left);
       if (room <= 0) return 0;
       const take = [];
@@ -5366,6 +5434,7 @@
         if (!x || !x.raw || !x.raw.id || isJunkTrack(x)) continue;
         const k = rawTrackKey(x.raw);
         if (seen.has(x.raw.id) || seen.has(k)) continue;
+        if (!force && recent.has(x.raw.id)){ skipped.push(x); continue; }
         seen.add(x.raw.id); seen.add(k);
         take.push(x);
       }
@@ -5377,48 +5446,116 @@
     };
 
     // ---- Bucket 1: Followed & liked artists ----
-    // Cold start (nothing followed yet): fall back to liked-song artists,
-    // then the built-in Artist Radios list.
     const followedPool = followedArtists.length ? followedArtists
       : likedArtists.length ? likedArtists
       : ARTIST_RADIO_NAMES;
-    const p1 = fetchArtistPool(shuffleCopy(followedPool).slice(0, 5), 6, l => emit(b1, l));
+    const pages = mode === 'familiar' ? 2 : 3;
+    const p1 = fetchArtistPool(shuffleCopy(followedPool).slice(0, 5), 8, l => emit(b1, l), pages);
 
     // ---- Bucket 2: Content-based "familiar to favorites" ----
-    // Proxy for BPM/genre similarity: artists behind liked songs and saved
-    // playlists that aren't already followed.
     const familiarPool = [...new Set([...likedArtists, ...playlistArtists])]
       .filter(a => !followedArtists.includes(a));
     const p2 = (async () => {
-      await fetchArtistPool(shuffleCopy(familiarPool).slice(0, 5), 6, l => emit(b2, l));
+      await fetchArtistPool(shuffleCopy(familiarPool).slice(0, 5), 8, l => emit(b2, l), pages);
       if (b2.left === nFamiliar){
-        // nothing came out of likes/playlists — stand in with a general home mix
         const h = await fetchHomeSection('Bollywood Mix', 12).catch(() => []);
         emit(b2, dedupeLite(h));
       }
     })();
 
-    // ---- Bucket 3: New / trending matching interests ----
-    // Hindi, Punjabi AND Haryanvi, each searched on its own and sent the moment it answers.
+    // ---- Bucket 3: New / trending ----
+    // Hindi, Punjabi AND Haryanvi. Every mix picks different search terms and a different result page.
     const yr = new Date().getFullYear();
-    const langTerms = [`new hindi songs ${yr}`, `new punjabi songs ${yr}`, `new haryanvi songs ${yr}`];
-    const perLang = Math.max(Math.ceil(nNew / langTerms.length), 2);
-    const p3 = Promise.all(langTerms.map(async q => {
+    const pool = freshSearchTerms(yr);
+    const termsPer = mode === 'fresh' ? 2 : 1;
+    const jobs = [];
+    for (const lang of Object.keys(pool)){
+      shuffleCopy(pool[lang]).slice(0, termsPer).forEach(q => jobs.push(q));
+    }
+    const capPer = Math.ceil(nNew / jobs.length) + 1;
+    const p3 = Promise.all(jobs.map(async q => {
       let r = [];
+      const page = 1 + Math.floor(Math.random() * (mode === 'fresh' ? 3 : 2));
       try {
-        if (getSourcePref() === 'youtube') r = await ytSearchTimed(q, 1, 6000, { date: 'month', sort: 'view_count' });
-        if (r.length < 6) r = r.concat(await fetchSaavnBatch(q, 14).catch(() => []));
+        r = await ytSearchTimed(q, page, 7000, page === 1 ? { date: 'month', sort: 'view_count' } : undefined);
+        if (r.length < 6 && page > 1) r = r.concat(await ytSearchTimed(q, 1, 6000));
       } catch(e){}
-      emit(b3, dedupeLite(r.filter(isAllowedLanguage).map(prepareLiteSong)), perLang);
+      emit(b3, dedupeLite(r.filter(isAllowedLanguage).map(prepareLiteSong)), capPer);
     }));
 
     await Promise.all([p1, p2, p3]);
+    // if the "no repeats" rule left the mix too short, top it up with the skipped ones
+    if (all.length < Math.min(12, targetSize)){
+      emit({ left: targetSize - all.length }, skipped, 0, true);
+    }
+    markMixServed(all.map(x => x.raw.id));
     return all;
   }
 
   // Cached 24h per the product spec (localStorage-scoped here — there's no
   // per-user backend to key it off — refreshed automatically on session
   // start once the cache goes stale).
+
+  /* ---------------------------------------------------------------------
+   * FAMILIAR / FRESH ON ANY LIST (NEW) — the toggle next to "Daily Mix / <name>" now works on
+   * whatever list is playing (Liked Songs, a singer, a movie, a playlist, a search…):
+   *   Familiar = songs of this list you already played or liked, most-played first
+   *   Fresh    = songs of this list you have NOT played yet (+ more from the same search)
+   * ------------------------------------------------------------------- */
+  const LOCAL_SOURCE_LABELS = ['Liked Songs', 'History', 'Downloads', 'Your Library', 'Saved Songs'];
+  async function applyModeToSource(mode, turnOff){
+    const cur = songs[activeIndex];
+    if (!cur || !cur._sourceLabel) return;
+    const label = cur._sourceLabel;
+    const orig = (cur._sourceOrig || cur._sourceSnapshots || []).filter(sn => sn && sn.raw);
+    if (turnOff){
+      pendingMixMode = null;
+      await playCollection(orig.slice(), label, label, orig);
+      updateFeedTopBar(songs[activeIndex] || null);
+      return;
+    }
+    pendingMixMode = mode;
+    updateFeedTopBar(cur);
+    showToast(mode === 'fresh' ? 'Finding songs you have not played…' : 'Picking songs you already know…');
+    try {
+      const played = new Map();
+      (history || []).forEach(h => { if (h && h.id) played.set(h.id, (played.get(h.id) || 0) + 1); });
+      const liked = new Set((await idbGetAll('likedSongs').catch(() => [])).map(x => x.id));
+      let pool;
+      if (mode === 'familiar'){
+        pool = orig.filter(sn => played.has(sn.id) || liked.has(sn.id));
+        pool = shuffleCopy(pool).sort((a, b) => (played.get(b.id) || 0) - (played.get(a.id) || 0));
+      } else {
+        pool = shuffleCopy(orig.filter(sn => !played.has(sn.id)));
+        const pls = await idbGetAll('playlists').catch(() => []);
+        const local = new Set(LOCAL_SOURCE_LABELS.concat(pls.map(x => x.name)));
+        if (!local.has(label)){
+          // a search / singer / movie list: look for more songs of the same thing, skipping ones already in the list
+          const q = (label.match(/"([^"]+)"/) || [])[1] || label;
+          const have = new Set(orig.map(x => x.id));
+          let more = [];
+          for (const pg of shuffleCopy([1, 2, 3]).slice(0, 2)){
+            const r = await ytSearchTimed(q, pg, 7000).catch(() => []);
+            more = more.concat(dedupeLite(r.filter(isAllowedLanguage).map(prepareLiteSong)));
+          }
+          more = more.filter(x => x && x.raw && !isJunkTrack(x) && !have.has(x.raw.id) && !played.has(x.raw.id));
+          const once = new Set();
+          more = more.filter(x => !once.has(x.raw.id) && once.add(x.raw.id));
+          pool = shuffleCopy(more).concat(pool);
+        }
+      }
+      if (pool.length < 2){
+        showToast(mode === 'fresh' ? 'No new songs found in this list' : 'You have not played enough of this list yet');
+        return;
+      }
+      await playCollection(pool, label, label, pool, { _sourceMode: mode, _sourceOrig: orig });
+      rememberLastSource(label, orig);     // the remembered playlist stays the full list
+    } finally {
+      pendingMixMode = null;
+      updateFeedTopBar(songs[activeIndex] || null);
+    }
+  }
+
   async function playYourDailyMix(mode){
     const dmMode = mode || 'default';
     // CHANGED: light the chip immediately; it used to light only once the first song had loaded.

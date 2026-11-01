@@ -1,17 +1,23 @@
 package com.vibe.music;
 
 import android.content.Intent;
+import android.net.Uri;
 
 import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.ForwardingPlayer;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.Player;
+import androidx.media3.datasource.DataSource;
 import androidx.media3.datasource.DefaultHttpDataSource;
+import androidx.media3.datasource.ResolvingDataSource;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
 import androidx.media3.session.MediaSession;
 import androidx.media3.session.MediaSessionService;
+
+import java.io.IOException;
 
 /**
  * The real music player. It lives in a foreground service, so the song keeps playing
@@ -44,8 +50,24 @@ public class VibePlaybackService extends MediaSessionService {
                 .setConnectTimeoutMs(15000)
                 .setReadTimeoutMs(20000);
 
+        // Songs queued as  vibeyt://<videoId>  are turned into a real YouTube audio address only at the
+        // moment they start playing. So the player can walk through the whole queue on its own,
+        // even when the phone is locked and the web page is asleep.
+        DataSource.Factory resolving = new ResolvingDataSource.Factory(http, dataSpec -> {
+            Uri u = dataSpec.uri;
+            if ("vibeyt".equals(u.getScheme())) {
+                String id = u.getAuthority();
+                try {
+                    return dataSpec.withUri(Uri.parse(VibeYtPlugin.resolveUrlBlocking(id)));
+                } catch (Exception e) {
+                    throw new IOException("Could not get YouTube audio: " + e.getMessage(), e);
+                }
+            }
+            return dataSpec;
+        });
+
         exo = new ExoPlayer.Builder(this)
-                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(http))
+                .setMediaSourceFactory(new DefaultMediaSourceFactory(this).setDataSourceFactory(resolving))
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(C.USAGE_MEDIA)
                         .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
@@ -53,6 +75,18 @@ public class VibePlaybackService extends MediaSessionService {
                 .setHandleAudioBecomingNoisy(true)
                 .setWakeMode(C.WAKE_MODE_NETWORK)
                 .build();
+
+        // a song that fails to load must not stop the music: move on to the next one
+        exo.addListener(new Player.Listener() {
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                if (exo.hasNextMediaItem()) {
+                    exo.seekToNextMediaItem();
+                    exo.prepare();
+                    exo.play();
+                }
+            }
+        });
 
         // The app (not the player) knows what the "next song" is, so next / previous
         // taps are passed to the app instead of moving inside the player.
