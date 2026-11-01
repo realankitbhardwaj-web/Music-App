@@ -122,6 +122,40 @@ gp = read(gp_path)
 gp = replace_once(gp, 'org.gradle.jvmargs=-Xmx1536m', 'org.gradle.jvmargs=-Xmx3g -Dfile.encoding=UTF-8', 'gradle.properties')
 write(gp_path, gp)
 
+# 5b) App icon: icon.png (any square picture, 1024x1024 is best) becomes the launcher icon.
+ICON = os.path.join(ROOT, 'icon.png')
+if os.path.exists(ICON):
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        import subprocess
+        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'pillow'])
+        from PIL import Image, ImageDraw
+    RES = os.path.join(ANDROID, 'app', 'src', 'main', 'res')
+    master = Image.open(ICON).convert('RGBA')
+    # density: (old-style icon px, adaptive icon layer px)
+    for dens, (leg, adp) in {'mdpi': (48, 108), 'hdpi': (72, 162), 'xhdpi': (96, 216),
+                             'xxhdpi': (144, 324), 'xxxhdpi': (192, 432)}.items():
+        folder = os.path.join(RES, 'mipmap-' + dens)
+        os.makedirs(folder, exist_ok=True)
+        big = leg * 4
+        base = master.resize((big, big), Image.LANCZOS)
+        sq = Image.new('L', (big, big), 0)
+        ImageDraw.Draw(sq).rounded_rectangle((0, 0, big - 1, big - 1), radius=int(big * 0.22), fill=255)
+        circ = Image.new('L', (big, big), 0)
+        ImageDraw.Draw(circ).ellipse((0, 0, big - 1, big - 1), fill=255)
+        a = base.copy(); a.putalpha(sq)
+        a.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher.png'))
+        b = base.copy(); b.putalpha(circ)
+        b.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_round.png'))
+        master.resize((adp, adp), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_foreground.png'))
+    bg = os.path.join(RES, 'values', 'ic_launcher_background.xml')
+    if os.path.exists(bg):
+        write(bg, read(bg).replace('#FFFFFF', '#B8237F'))
+    print('app icon set from icon.png')
+else:
+    print('no icon.png found - the default icon stays')
+
 # 6) The page asks to be drawn under the status bar (viewport-fit=cover). In the app that made the
 #    top bar hide behind the camera/status bar. Without it Android keeps the page between the bars.
 www_index = os.path.join(ROOT, 'www', 'index.html')
