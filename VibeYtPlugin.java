@@ -430,6 +430,30 @@ public class VibeYtPlugin extends Plugin {
         });
     }
 
+    /** plain text/JSON from a web address (no browser CORS limits) */
+    @PluginMethod
+    public void fetchText(final PluginCall call) {
+        final String url = call.getString("url", "");
+        io.execute(() -> {
+            try {
+                okhttp3.Request req = new okhttp3.Request.Builder()
+                        .url(url)
+                        .header("User-Agent", NewPipeDownloader.USER_AGENT)
+                        .build();
+                try (okhttp3.Response r = http.newCall(req).execute()) {
+                    if (!r.isSuccessful() || r.body() == null) throw new IOException("HTTP " + r.code());
+                    String text = r.body().string();
+                    if (text.length() > 1000000) text = text.substring(0, 1000000);
+                    JSObject o = new JSObject();
+                    o.put("text", text);
+                    call.resolve(o);
+                }
+            } catch (Throwable e) {
+                call.reject(String.valueOf(e.getMessage()));
+            }
+        });
+    }
+
     @PluginMethod
     public void search(final PluginCall call) {
         final String q = call.getString("q", "");

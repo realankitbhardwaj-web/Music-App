@@ -2652,7 +2652,7 @@
     } catch(e){}
     nativeAdoptId = id;
     suppressSwipeLog = true;
-    try { goToCard(idx); } finally { suppressSwipeLog = false; }
+    try { goToCard(idx, true); } finally { suppressSwipeLog = false; }   // instant: a smooth scroll never finishes while the screen is locked
   }
   // next / previous tapped in the notification or on the lock screen
   function onNativeRemote(ev){
@@ -3388,6 +3388,59 @@
     out.artists = out.artists.filter(n => !ytIsLabel(n));
     return out;
   }
+
+  // Singer + album/movie (+ language) from the iTunes catalogue — a good source for Hindi / Punjabi film songs.
+  function ituneNorm(x){ return String(x || '').toLowerCase().replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/[^\p{L}\p{N}\s]/gu, ' ').split(/\s+/).filter(Boolean); }
+  function cleanAlbumName(n){
+    return String(n || '')
+      .replace(/\s*[\(\[]\s*(original motion picture soundtrack|original soundtrack|from [^\)\]]*|deluxe[^\)\]]*|music from [^\)\]]*|original [^\)\]]*)[\)\]]/ig, '')
+      .replace(/\s*-\s*(single|ep)\s*$/i, '')
+      .replace(/\s+/g, ' ').trim();
+  }
+  async function itunesLookup(song){
+    const baseTitle = String(song.title || '').replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!baseTitle) return null;
+    const artist = (song.artistList && song.artistList[0]) || '';
+    const url = 'https://itunes.apple.com/search?term=' + encodeURIComponent((baseTitle + ' ' + artist).trim()) + '&entity=song&country=IN&limit=10';
+    let text = null;
+    try {
+      if (NATIVE){
+        const r = await Promise.race([nativeSend('fetchText', { url }), new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 9000))]);
+        text = r && r.text;
+      } else {
+        const r = await fetch(url);
+        text = await r.text();
+      }
+    } catch(e){ return null; }
+    let results;
+    try { results = (JSON.parse(text).results) || []; } catch(e){ return null; }
+    const want = new Set(ituneNorm(baseTitle));
+    const dur = song.durationSeconds || 0;
+    let best = null, bestScore = 0;
+    for (const it of results){
+      const toks = ituneNorm(it.trackName);
+      if (!toks.length || !want.size) continue;
+      const common = toks.filter(t => want.has(t)).length;
+      const overlap = common / Math.max(toks.length, want.size);
+      const contain = common / toks.length;          // how much of the iTunes title is inside the YouTube title
+      const tsec = (it.trackTimeMillis || 0) / 1000;
+      const durOk = !dur || !tsec || Math.abs(tsec - dur) <= 10;
+      const durTight = !!(dur && tsec && Math.abs(tsec - dur) <= 6);
+      const ok = overlap >= 0.6 || (contain >= 0.8 && (toks.length >= 2 || durTight));
+      const score = Math.max(overlap, contain * 0.9);
+      if (ok && durOk && score > bestScore){ best = it; bestScore = score; }
+    }
+    if (!best) return null;
+    const album = cleanAlbumName(best.collectionName);
+    const fromTitle = (typeof ytMovieFromTitle === 'function') ? ytMovieFromTitle(String(best.trackName || '')) : '';
+    const isSingle = !album || ituneNorm(album).join(' ') === ituneNorm(best.trackName).join(' ');   // a single is not a movie
+    const genre = String(best.primaryGenreName || '');
+    return {
+      artists: splitNames(best.artistName || '').filter(n => !ytIsLabel(n)),
+      album: !isSingle ? album : (fromTitle || ''),
+      language: /punjabi/i.test(genre) ? 'punjabi' : /haryanvi/i.test(genre) ? 'haryanvi' : /bollywood|hindi/i.test(genre) ? 'hindi' : ''
+    };
+  }
   // main artist from YouTube Music: used when neither the channel nor the description names a singer
   async function ytMusicArtist(song){
     const base = String(song.title || '').replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -3410,20 +3463,30 @@
     return name && !ytIsLabel(name) ? name : null;
   }
   async function enrichYtMeta(song){
-    if (!NATIVE || !song || song._metaDone) return;
+    if (!song || song._metaDone) return;
     const id = String(song.id || '');
     if (!id.startsWith('yt_')) return;
     song._metaDone = true;
     let m = null;
-    try { m = await nativeSend('meta', { ytId: id.slice(3) }); } catch(e){}
+    if (NATIVE){ try { m = await nativeSend('meta', { ytId: id.slice(3) }); } catch(e){} }
     let changed = false;
     if (m && m.uploader && !song.channel){ song.channel = ytCleanArtist(m.uploader); changed = true; }
     const info = parseYtDescription(m && m.desc);
     if (info.artists.length){ song.artistList = info.artists; changed = true; }
     if (info.album && !song.album){ song.album = info.album; changed = true; }
     if (changed) refreshChips(song);
-    // still no singer (the channel is a label and the description says nothing): ask YouTube Music
-    if (!(song.artistList || []).length){
+    // iTunes: fills in the singers / movie-album / language the description did not give
+    const it = await itunesLookup(song);
+    if (it){
+      const cur = song.artistList || [];
+      const norm = x => String(x).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+      if (it.artists.length && (!cur.length || cur.every(c => it.artists.some(x => norm(x) === norm(c))))) song.artistList = it.artists;
+      if (it.album && !song.album) song.album = it.album;
+      if (it.language && !song.language) song.language = it.language;
+      refreshChips(song);
+    }
+    // still no singer: ask YouTube Music for the main artist
+    if (NATIVE && !(song.artistList || []).length){
       const a = await ytMusicArtist(song);
       if (a){ song.artistList = [a]; refreshChips(song); }
     }
@@ -4159,9 +4222,25 @@
     document.querySelectorAll('.song-card').forEach(c => io.observe(c));
   }
 
+  // Only a finger on the screen may change the song by scrolling. While the phone was locked the
+  // player moved on by itself; when the screen wakes up the feed still shows the OLD card, and that
+  // used to start the old song again. Now the feed just snaps back to the song that is really playing.
+  let lastUserGestureTs = 0;
+  ['touchstart', 'pointerdown', 'wheel', 'keydown'].forEach(ev =>
+    document.addEventListener(ev, () => { lastUserGestureTs = Date.now(); }, { capture: true, passive: true }));
+  function snapToActiveCard(){
+    if (activeIndex < 0) return;
+    const c = feedEl.querySelector(`.song-card[data-index="${activeIndex}"]`);
+    if (c) c.scrollIntoView({ behavior: 'auto', block: 'start' });
+  }
+  if (NATIVE) document.addEventListener('visibilitychange', () => { if (!document.hidden) setTimeout(snapToActiveCard, 150); });
   function scheduleActivation(){
     clearTimeout(activationDebounce);
     activationDebounce = setTimeout(() => {
+      if (NATIVE && mode === 'native' && currentSong && Date.now() - lastUserGestureTs > 4000){
+        snapToActiveCard();
+        return;
+      }
       let bestIdx = activeIndex;
       let bestRatio = activeIndex >= 0 ? (cardRatios.get(activeIndex) || 0) : -1;
       cardRatios.forEach((ratio, idx) => {
