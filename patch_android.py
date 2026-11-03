@@ -71,7 +71,62 @@ write(rb_path, rb)
 
 # Same signing key on every build, so a new APK installs OVER the old app (keeps your data).
 # Without this, GitHub makes a brand-new key each time and Android says "App not installed".
+KEYSTORE_B64 = (
+    "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"
+)
+
 KEYSTORE = os.path.join(ROOT, 'vibe-debug.keystore')
+if not os.path.exists(KEYSTORE):
+    # The signing key is also kept inside this script, so the repo does not need the binary file.
+    import base64
+    with open(KEYSTORE, 'wb') as f:
+        f.write(base64.b64decode(KEYSTORE_B64))
+    print('vibe-debug.keystore was not in the repo - recreated it from the copy inside this script')
 if os.path.exists(KEYSTORE):
     SIGNING = """    signingConfigs {
         debug {
@@ -123,38 +178,58 @@ gp = replace_once(gp, 'org.gradle.jvmargs=-Xmx1536m', 'org.gradle.jvmargs=-Xmx3g
 write(gp_path, gp)
 
 # 5b) App icon: icon.png (any square picture, 1024x1024 is best) becomes the launcher icon.
-ICON = os.path.join(ROOT, 'icon.png')
-if os.path.exists(ICON):
+#     This step can never stop the build: if anything goes wrong the default icon is kept.
+def load_pil():
     try:
         from PIL import Image, ImageDraw
+        return Image, ImageDraw
     except ImportError:
-        import subprocess
-        subprocess.check_call([sys.executable, '-m', 'pip', 'install', '--quiet', 'pillow'])
-        from PIL import Image, ImageDraw
-    RES = os.path.join(ANDROID, 'app', 'src', 'main', 'res')
-    master = Image.open(ICON).convert('RGBA')
-    # density: (old-style icon px, adaptive icon layer px)
-    for dens, (leg, adp) in {'mdpi': (48, 108), 'hdpi': (72, 162), 'xhdpi': (96, 216),
-                             'xxhdpi': (144, 324), 'xxxhdpi': (192, 432)}.items():
-        folder = os.path.join(RES, 'mipmap-' + dens)
-        os.makedirs(folder, exist_ok=True)
-        big = leg * 4
-        base = master.resize((big, big), Image.LANCZOS)
-        sq = Image.new('L', (big, big), 0)
-        ImageDraw.Draw(sq).rounded_rectangle((0, 0, big - 1, big - 1), radius=int(big * 0.22), fill=255)
-        circ = Image.new('L', (big, big), 0)
-        ImageDraw.Draw(circ).ellipse((0, 0, big - 1, big - 1), fill=255)
-        a = base.copy(); a.putalpha(sq)
-        a.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher.png'))
-        b = base.copy(); b.putalpha(circ)
-        b.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_round.png'))
-        master.resize((adp, adp), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_foreground.png'))
-    bg = os.path.join(RES, 'values', 'ic_launcher_background.xml')
-    if os.path.exists(bg):
-        write(bg, read(bg).replace('#FFFFFF', '#B8237F'))
-    print('app icon set from icon.png')
-else:
-    print('no icon.png found - the default icon stays')
+        pass
+    import subprocess
+    # Ubuntu 24.04 refuses a plain "pip install", so try the variants that are allowed
+    for extra in (['--break-system-packages'], ['--user', '--break-system-packages'], ['--user'], []):
+        subprocess.call([sys.executable, '-m', 'pip', 'install', '--quiet', 'pillow'] + extra)
+        try:
+            from PIL import Image, ImageDraw
+            return Image, ImageDraw
+        except ImportError:
+            continue
+    return None
+
+ICON = os.path.join(ROOT, 'icon.png')
+try:
+    if not os.path.exists(ICON):
+        print('no icon.png found - the default icon stays')
+    else:
+        pil = load_pil()
+        if pil is None:
+            print('WARNING: could not install the image library - the default icon stays')
+        else:
+            Image, ImageDraw = pil
+            RES = os.path.join(ANDROID, 'app', 'src', 'main', 'res')
+            master = Image.open(ICON).convert('RGBA')
+            # density: (old-style icon px, adaptive icon layer px)
+            for dens, (leg, adp) in {'mdpi': (48, 108), 'hdpi': (72, 162), 'xhdpi': (96, 216),
+                                     'xxhdpi': (144, 324), 'xxxhdpi': (192, 432)}.items():
+                folder = os.path.join(RES, 'mipmap-' + dens)
+                os.makedirs(folder, exist_ok=True)
+                big = leg * 4
+                base = master.resize((big, big), Image.LANCZOS)
+                sq = Image.new('L', (big, big), 0)
+                ImageDraw.Draw(sq).rounded_rectangle((0, 0, big - 1, big - 1), radius=int(big * 0.22), fill=255)
+                circ = Image.new('L', (big, big), 0)
+                ImageDraw.Draw(circ).ellipse((0, 0, big - 1, big - 1), fill=255)
+                a = base.copy(); a.putalpha(sq)
+                a.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher.png'))
+                b = base.copy(); b.putalpha(circ)
+                b.resize((leg, leg), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_round.png'))
+                master.resize((adp, adp), Image.LANCZOS).save(os.path.join(folder, 'ic_launcher_foreground.png'))
+            bg = os.path.join(RES, 'values', 'ic_launcher_background.xml')
+            if os.path.exists(bg):
+                write(bg, read(bg).replace('#FFFFFF', '#B8237F'))
+            print('app icon set from icon.png')
+except Exception as e:
+    print('WARNING: icon step skipped (%s) - the default icon stays' % e)
 
 # 6) The page asks to be drawn under the status bar (viewport-fit=cover). In the app that made the
 #    top bar hide behind the camera/status bar. Without it Android keeps the page between the bars.
