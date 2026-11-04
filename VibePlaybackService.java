@@ -30,6 +30,9 @@ public class VibePlaybackService extends MediaSessionService {
     /** set by the plugin; called when the user taps next / previous in the notification */
     static volatile RemoteListener remoteListener;
 
+    /** last problem the player hit while the page was asleep (shown to the user when the phone is opened) */
+    static volatile String lastError = "";
+
     private MediaSession session;
     private ExoPlayer exo;
 
@@ -57,11 +60,17 @@ public class VibePlaybackService extends MediaSessionService {
             Uri u = dataSpec.uri;
             if ("vibeyt".equals(u.getScheme())) {
                 String id = u.getAuthority();
-                try {
-                    return dataSpec.withUri(Uri.parse(VibeYtPlugin.resolveUrlBlocking(id)));
-                } catch (Exception e) {
-                    throw new IOException("Could not get YouTube audio: " + e.getMessage(), e);
+                Exception last = null;
+                for (int attempt = 0; attempt < 3; attempt++) {
+                    try {
+                        return dataSpec.withUri(Uri.parse(VibeYtPlugin.resolveUrlBlocking(id)));
+                    } catch (Exception e) {
+                        last = e;
+                        try { Thread.sleep(700); } catch (InterruptedException ie) { break; }
+                    }
                 }
+                lastError = "YouTube link: " + (last == null ? "failed" : String.valueOf(last.getMessage()));
+                throw new IOException("Could not get YouTube audio: " + (last == null ? "" : last.getMessage()), last);
             }
             return dataSpec;
         });
@@ -80,6 +89,7 @@ public class VibePlaybackService extends MediaSessionService {
         exo.addListener(new Player.Listener() {
             @Override
             public void onPlayerError(PlaybackException error) {
+                lastError = "Player: " + error.getErrorCodeName();
                 if (exo.hasNextMediaItem()) {
                     exo.seekToNextMediaItem();
                     exo.prepare();

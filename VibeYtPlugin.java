@@ -232,6 +232,7 @@ public class VibeYtPlugin extends Plugin {
         o.put("buffering", st == Player.STATE_BUFFERING);
         o.put("ended", st == Player.STATE_ENDED);
         o.put("playWhenReady", c.getPlayWhenReady());
+        o.put("err", VibePlaybackService.lastError);
         o.put("pos", Math.max(c.getCurrentPosition(), 0L));
         o.put("dur", dur < 0 ? 0L : dur);
         notifyListeners("state", o);
@@ -370,6 +371,18 @@ public class VibeYtPlugin extends Plugin {
                     }
                 }
             }
+            // look up the next few YouTube links now (kept for 90 min) so the switch to them is instant
+            final List<String> warm = new ArrayList<>();
+            for (MediaItem mi : list) {
+                if (mi.localConfiguration != null && "vibeyt".equals(mi.localConfiguration.uri.getScheme()) && warm.size() < 3) {
+                    warm.add(mi.localConfiguration.uri.getAuthority());
+                }
+            }
+            io.execute(() -> {
+                for (String w : warm) {
+                    try { resolveYt(w); } catch (Throwable ignored) { }
+                }
+            });
             withController(c -> {
                 if (token != queueToken) { call.resolve(); return; }
                 MediaItem cur = c.getCurrentMediaItem();

@@ -2316,7 +2316,7 @@
       }
     : null;
   let nativeState = { id: '', playing: false, buffering: false, ended: false, pos: 0, dur: 0, ts: 0 };
-  let nativeAdoptId = null, suppressSwipeLog = false, nativeErrStreak = 0, nativeSyncKey = '', nativeGuardUntil = 0;
+  let nativeAdoptId = null, suppressSwipeLog = false, nativeErrStreak = 0, nativeSyncKey = '', nativeGuardUntil = 0, shuffleAhead = [], nativeLastErr = '';
   if (NATIVE){
     NATIVE.on('state', (st) => applyNativeState(st));
     NATIVE.on('ended', (ev) => onNativeEnded(ev));
@@ -2560,6 +2560,7 @@
     if (!st) return;
     nativeState = { id: st.id || '', playing: !!st.playing, buffering: !!st.buffering, ended: !!st.ended,
                     pos: (st.pos || 0) / 1000, dur: (st.dur || 0) / 1000, ts: Date.now() };
+    if (st.err && st.err !== nativeLastErr){ nativeLastErr = st.err; showToast(String(st.err).slice(0, 90)); }
     if (mode === 'native' && currentSong && nativeState.id && nativeState.id !== currentSong.id && Date.now() > nativeGuardUntil){
       if (songs.some(sg => sg.id === nativeState.id)){ onNativeTransition({ id: nativeState.id }); return; }
     }
@@ -2604,23 +2605,52 @@
   }
   // Tells the player which songs come next, so it can move on by itself (gapless) even when
   // the phone is locked and this page is asleep.
+  // One queue entry for the player (or null when the song cannot be handed to the player yet)
+  function nativeQueueItem(sg){
+    const u = String((sg && sg.audioUrl) || '');
+    if (!u || u.startsWith('yt-embed:') || u.startsWith('blob:')) return null;
+    const it = { id: sg.id, title: sg.title || '', artist: sg.artist || '', artwork: sg.artwork || '' };
+    if (u.startsWith('native-yt:')) it.ytId = u.slice(10);
+    else if (/^https?:/i.test(u)) it.url = u;
+    else return null;
+    return it;
+  }
+  // Shuffle: decide the next songs NOW (same list the next-button uses) so the player can play
+  // them one after another even while the phone is locked.
+  function refreshShuffleAhead(){
+    const cur = songs[activeIndex];
+    const idxs = (cur && cur._sourceSnapshots)
+      ? songs.reduce((acc, sg, i) => { if (sg._sourceSnapshots === cur._sourceSnapshots) acc.push(i); return acc; }, [])
+      : songs.map((_, i) => i);
+    const curId = currentSong && currentSong.id;
+    const valid = new Set(idxs.map(i => songs[i].id));
+    shuffleAhead = shuffleAhead.filter(id => id !== curId && valid.has(id));
+    const have = new Set(shuffleAhead);
+    const cand = shuffleCopy(idxs.map(i => songs[i]).filter(sg => sg.id !== curId && !have.has(sg.id) && nativeQueueItem(sg)));
+    for (const sg of cand){ if (shuffleAhead.length >= 15) break; shuffleAhead.push(sg.id); }
+  }
   function nativeSyncQueue(force){
     if (!NATIVE || mode !== 'native' || !currentSong) return;
     const items = [];
-    const noNext = shuffleOn || repeatOn || (typeof sleepTimerEndOfSong !== 'undefined' && sleepTimerEndOfSong);
+    const noNext = repeatOn || (typeof sleepTimerEndOfSong !== 'undefined' && sleepTimerEndOfSong);
     if (!noNext){
-      for (let i = activeIndex + 1; i < songs.length && items.length < 15; i++){
-        const sg = songs[i];
-        const u = String((sg && sg.audioUrl) || '');
-        if (!u || u.startsWith('yt-embed:') || u.startsWith('blob:')) break;
-        const it = { id: sg.id, title: sg.title || '', artist: sg.artist || '', artwork: sg.artwork || '' };
-        if (u.startsWith('native-yt:')) it.ytId = u.slice(10);
-        else if (/^https?:/i.test(u)) it.url = u;
-        else break;
-        items.push(it);
+      if (shuffleOn){
+        refreshShuffleAhead();
+        for (const id of shuffleAhead){
+          if (items.length >= 15) break;
+          const sg = songs.find(x => x.id === id);
+          const it = sg && nativeQueueItem(sg);
+          if (it) items.push(it);
+        }
+      } else {
+        for (let i = activeIndex + 1; i < songs.length && items.length < 15; i++){
+          const it = nativeQueueItem(songs[i]);
+          if (!it) break;
+          items.push(it);
+        }
       }
     }
-    const key = currentSong.id + '|' + (repeatOn ? 1 : 0) + '|' + items.map(x => x.id).join(',');
+    const key = currentSong.id + '|' + (repeatOn ? 1 : 0) + (shuffleOn ? 's' : '') + '|' + items.map(x => x.id).join(',');
     if (!force && key === nativeSyncKey) return;
     nativeSyncKey = key;
     nativeSend('setQueue', { afterId: currentSong.id, items, repeatOne: !!repeatOn }).catch(() => { nativeSyncKey = ''; });
@@ -4279,6 +4309,12 @@
 
     // Shuffle toggle — jump to a random loaded card instead of the next one.
     if (shuffleOn){
+      if (NATIVE && mode === 'native'){
+        refreshShuffleAhead();
+        const nid = shuffleAhead[0];
+        const nidx = nid ? songs.findIndex(sg => sg.id === nid) : -1;
+        if (nidx >= 0){ goToCard(nidx); return; }
+      }
       const pool = sourceIdxs || songs.map((_, i) => i);
       if (pool.length > 1){
         let idx;
