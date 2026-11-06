@@ -336,6 +336,16 @@ public class VibeYtPlugin extends Plugin {
         });
     }
 
+    /** playback speed (pitch stays the same) */
+    @PluginMethod
+    public void setSpeed(final PluginCall call) {
+        final double sp = call.getDouble("speed", 1.0);
+        withController(c -> {
+            c.setPlaybackSpeed((float) Math.max(0.25, Math.min(3.0, sp)));
+            call.resolve();
+        });
+    }
+
     @PluginMethod
     public void seek(final PluginCall call) {
         final double ms = call.getDouble("ms", 0.0);

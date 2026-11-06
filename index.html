@@ -275,6 +275,7 @@
       <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10" data-f="singer">🎤 Singer</button>
       <button class="searchFilterBtn flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold bg-white/10" data-f="movie">🎬 Movie / Album</button>
     </div>
+    <div id="searchMoodRow" class="flex gap-2 px-4 pb-2 flex-shrink-0 overflow-x-auto" style="scrollbar-width:none;"></div>
     <p id="searchStatus" class="px-5 pb-2 text-xs text-white/40 flex-shrink-0">Search for songs, artists, or movies</p>
     <div class="hidden flex items-center gap-2 mx-3 mb-2" id="searchPlayRow">
       <button id="searchPlayAllBtn" class="play-pill self-start flex-shrink-0"><svg width="10" height="10" viewBox="0 0 24 24" fill="white"><path d="M8 5v14l11-7z"/></svg> PLAY</button>
@@ -497,7 +498,8 @@
       🔍 Search songs, artists, movies…
     </button>
 
-    <p class="text-sm font-bold text-white/80 mb-2.5">Suggested Radios</p>
+    <p class="text-sm font-bold text-white/80 mb-2">Mood</p>
+    <div id="langPills" class="flex gap-2 overflow-x-auto pb-2 mb-3" style="scrollbar-width:none;"></div>
     <div id="moodGrid" class="grid grid-cols-3 gap-2.5 mb-6"></div>
 
     <p class="text-sm font-bold text-white/80 mb-2.5">Artist Radios</p>
@@ -1149,7 +1151,7 @@
       } catch(e){ items = []; }
     }
     // keep real songs: drop shorts/clips (<45s) and long mixes/podcasts/live (>15min)
-    return items.filter(x => x.dur >= 45 && x.dur <= 900).map(x => ytMakeRaw(x.id, x.title, x.author, x.dur));
+    return items.filter(x => x.dur >= 45 && x.dur <= 14400).map(x => ytMakeRaw(x.id, x.title, x.author, x.dur));
   }
   async function ytSearchSafe(term, page, opts){
     try { return await ytSearch(term, page, opts); } catch(e){ return []; }
@@ -2316,6 +2318,7 @@
       }
     : null;
   let nativeState = { id: '', playing: false, buffering: false, ended: false, pos: 0, dur: 0, ts: 0 };
+  let scrubActive = false;
   let nativeAdoptId = null, suppressSwipeLog = false, nativeErrStreak = 0, nativeSyncKey = '', nativeGuardUntil = 0, shuffleAhead = [], nativeLastErr = '';
   if (NATIVE){
     NATIVE.on('state', (st) => applyNativeState(st));
@@ -2552,7 +2555,7 @@
   function nativeCurrentTime(){
     if (!currentSong || nativeState.id !== currentSong.id) return 0;
     let t = nativeState.pos;
-    if (nativeState.playing) t += (Date.now() - nativeState.ts) / 1000;
+    if (nativeState.playing) t += ((Date.now() - nativeState.ts) / 1000) * playbackSpeed;
     const d = nativeDuration();
     return d > 0 ? Math.min(t, d) : t;
   }
@@ -2595,7 +2598,7 @@
       if (a.startsWith('native-yt:')) p = nativeSend('play', Object.assign({ ytId: a.slice(10) }, base));
       else if (a.startsWith('blob:')) p = blobUrlToBase64(a).then(b64 => nativeSend('play', Object.assign({ data: b64 }, base)));
       else p = nativeSend('play', Object.assign({ url: a }, base));
-      p.then(() => { if (currentSong === song) nativeSyncQueue(true); })
+      p.then(() => { if (currentSong === song){ nativeSyncQueue(true); if (playbackSpeed !== 1) applySpeed(); } })
        .catch((err) => { console.warn('[native] play failed', err); nativeGiveUp(song); });
     } else {
       nativeSyncQueue(true);
@@ -2759,6 +2762,7 @@
     if (audioEl) return audioEl;
     audioEl = new Audio();
     audioEl.preload = 'auto';
+    try { audioEl.defaultPlaybackRate = playbackSpeed; audioEl.playbackRate = playbackSpeed; audioEl.preservesPitch = true; } catch(e){}
     audioEl.addEventListener('playing', () => setBuffering(false));
     audioEl.addEventListener('waiting', () => setBuffering(true));
     audioEl.addEventListener('play', () => { userPaused = false; setPlayIcon(true); if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing'; });
@@ -2824,6 +2828,61 @@
       nativeSend('stop').catch(()=>{});
     }
     mode = 'none';
+  }
+
+
+  /* ---------------------------------------------------------------------
+   * PLAYBACK SPEED (NEW) — slower or faster, the voice pitch stays the same. Remembered.
+   * ------------------------------------------------------------------- */
+  const LS_SPEED = 'vibe_speed';
+  let playbackSpeed = (() => { const v = Number(getLS(LS_SPEED, 1)); return (v >= 0.25 && v <= 3) ? v : 1; })();
+  function fmtSpeed(v){ return (Math.round(v * 100) / 100) + 'x'; }
+  function applySpeed(){
+    const sp = playbackSpeed;
+    if (mode === 'native' && NATIVE) nativeSend('setSpeed', { speed: sp }).catch(() => {});
+    if (audioEl){
+      try { audioEl.defaultPlaybackRate = sp; audioEl.playbackRate = sp;
+            audioEl.preservesPitch = true; audioEl.webkitPreservesPitch = true; audioEl.mozPreservesPitch = true; } catch(e){}
+    }
+    if (mode === 'yt' && ytPlayer && ytPlayerReady){ try { ytPlayer.setPlaybackRate(sp); } catch(e){} }
+    document.querySelectorAll('.speedBtn').forEach(b => {
+      b.textContent = fmtSpeed(sp);
+      b.classList.toggle('text-[#e6146e]', sp !== 1);
+      b.classList.toggle('text-white/50', sp === 1);
+    });
+  }
+  function setPlaybackSpeed(v){
+    playbackSpeed = Math.max(0.25, Math.min(3, Math.round(v * 20) / 20));
+    setLS(LS_SPEED, playbackSpeed);
+    applySpeed();
+    const val = document.getElementById('speedVal'), rng = document.getElementById('speedRange');
+    if (val) val.textContent = fmtSpeed(playbackSpeed);
+    if (rng) rng.value = playbackSpeed;
+  }
+  function openSpeedSheet(){
+    let m = document.getElementById('speedSheet');
+    if (!m){
+      m = document.createElement('div');
+      m.id = 'speedSheet';
+      m.className = 'fixed inset-0 z-50 flex items-end justify-center bg-black/60';
+      m.innerHTML = `
+        <div class="w-full max-w-md rounded-t-3xl bg-[#1a1a1f] p-5 pb-8 text-white">
+          <p class="text-xs text-white/50 text-center mb-1">Playback speed</p>
+          <p id="speedVal" class="text-center text-2xl font-extrabold mb-3">1x</p>
+          <input id="speedRange" type="range" min="0.25" max="3" step="0.05" class="w-full" style="accent-color:#e6146e;">
+          <div class="flex justify-between text-[10px] text-white/40 mt-1"><span>0.25x</span><span>1x</span><span>2x</span><span>3x</span></div>
+          <div class="grid grid-cols-6 gap-2 mt-4">
+            ${[0.5, 0.75, 1, 1.25, 1.5, 2].map(v => `<button class="speedPreset py-2 rounded-xl bg-white/10 text-xs font-semibold" data-v="${v}">${fmtSpeed(v)}</button>`).join('')}
+          </div>
+        </div>`;
+      document.body.appendChild(m);
+      m.addEventListener('click', (e) => { if (e.target === m) m.classList.add('hidden'); });
+      m.querySelector('#speedRange').addEventListener('input', (e) => setPlaybackSpeed(Number(e.target.value)));
+      m.querySelectorAll('.speedPreset').forEach(b => b.addEventListener('click', () => setPlaybackSpeed(Number(b.dataset.v))));
+    }
+    m.classList.remove('hidden');
+    document.getElementById('speedVal').textContent = fmtSpeed(playbackSpeed);
+    document.getElementById('speedRange').value = playbackSpeed;
   }
 
   function playSong(song){
@@ -3339,7 +3398,7 @@
         <div class="songChips flex flex-wrap gap-1.5 mb-3">${chipsHTML(song)}</div>
         <!-- NEW: shuffle + repeat toggles, sit right above the progress bar -->
         <div class="flex items-center justify-between gap-1 mb-1.5">
-          <span></span>
+          <span><button class="speedBtn h-8 px-2.5 rounded-full text-[11px] font-bold ${playbackSpeed === 1 ? 'text-white/50' : 'text-[#e6146e]'}" title="Playback speed">${fmtSpeed(playbackSpeed)}</button></span>
           <span class="flex items-center gap-1">
           <button class="shuffleBtn w-8 h-8 rounded-full flex items-center justify-center transition-colors ${shuffleOn ? 'text-[#e6146e]' : 'text-white/50'}" title="Shuffle">
             <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="16 3 21 3 21 8"/><line x1="4" y1="20" x2="21" y2="3"/><polyline points="21 16 21 21 16 21"/><line x1="15" y1="15" x2="21" y2="21"/><line x1="4" y1="4" x2="9" y2="9"/></svg>
@@ -3350,8 +3409,10 @@
           </button>
           </span>
         </div>
-        <div class="progress-wrap w-full h-1.5 bg-white/15 rounded-full overflow-hidden cursor-pointer">
-          <div class="progress-fill h-full rounded-full" style="width:0%; background:#FB3958;"></div>
+        <div class="progress-hit py-3 -my-3 cursor-pointer" style="touch-action:none;">
+          <div class="progress-wrap w-full h-1.5 bg-white/15 rounded-full overflow-hidden">
+            <div class="progress-fill h-full rounded-full" style="width:0%; background:#FB3958;"></div>
+          </div>
         </div>
         <div class="flex justify-between mt-1.5 text-[11px] text-white/50">
           <span class="cur-time">0:00</span>
@@ -3471,6 +3532,72 @@
       language: /punjabi/i.test(genre) ? 'punjabi' : /haryanvi/i.test(genre) ? 'haryanvi' : /bollywood|hindi/i.test(genre) ? 'hindi' : ''
     };
   }
+
+  // JioSaavn is used ONLY to read tags (singers, movie/album, language). Songs themselves come from YouTube.
+  async function fetchSaavnTagResults(term){
+    const urls = SAAVN_HOSTS.map(h => saavnUrl(h, term, 8, 0));
+    const one = async (u) => {
+      let data;
+      if (NATIVE){
+        const r = await nativeSend('fetchText', { url: u });
+        data = JSON.parse(r.text);
+      } else {
+        const res = await fetchWithTimeout(u, 7000);
+        if (!res.ok) throw new Error('HTTP ' + res.status);
+        data = await res.json();
+      }
+      const arr = (data && data.data && data.data.results) || [];
+      if (!arr.length) throw new Error('empty');
+      return arr;
+    };
+    return await Promise.race([
+      Promise.any(urls.map(one)),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('slow')), 10000))
+    ]);
+  }
+  async function saavnTagLookup(song){
+    const baseTitle = String(song.title || '').replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/\s+/g, ' ').trim();
+    if (!baseTitle) return null;
+    const artist = (song.artistList && song.artistList[0]) || '';
+    let results;
+    try { results = await fetchSaavnTagResults((baseTitle + ' ' + artist).trim()); } catch(e){ return null; }
+    const want = new Set(ituneNorm(baseTitle));
+    const dur = song.durationSeconds || 0;
+    let best = null, bestScore = 0;
+    for (const r of results){
+      const toks = ituneNorm(decodeEntities(r.name || ''));
+      if (!toks.length || !want.size) continue;
+      const common = toks.filter(t => want.has(t)).length;
+      const overlap = common / Math.max(toks.length, want.size);
+      const contain = common / toks.length;
+      const rd = Number(r.duration) || 0;
+      const durOk = !dur || !rd || Math.abs(rd - dur) <= 15;   // a YouTube video often has a longer intro
+      const ok = overlap >= 0.6 || (contain >= 0.8 && (toks.length >= 2 || (dur && rd && Math.abs(rd - dur) <= 8)));
+      const score = Math.max(overlap, contain * 0.9);
+      if (ok && durOk && score > bestScore){ best = r; bestScore = score; }
+    }
+    if (!best) return null;
+    const prim = ((best.artists && best.artists.primary) || []).map(a => decodeEntities(a.name || '')).filter(Boolean);
+    const album = decodeEntities((best.album && best.album.name) || '').trim();
+    const isSingle = !album || ituneNorm(album).join(' ') === ituneNorm(decodeEntities(best.name || '')).join(' ');
+    return {
+      artists: prim.filter(n => !ytIsLabel(n)).slice(0, 4),
+      album: isSingle ? '' : album,
+      language: String(best.language || '').toLowerCase()
+    };
+  }
+  // put tags on a song: only fill what is still empty (a fuller singer list may replace a single singer)
+  function applyTags(song, t){
+    if (!t) return false;
+    let changed = false;
+    const cur = song.artistList || [];
+    const norm = x => String(x).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
+    if (t.artists && t.artists.length && (!cur.length || cur.every(c => t.artists.some(x => norm(x) === norm(c))))
+        && t.artists.length > cur.length){ song.artistList = t.artists; changed = true; }
+    if (t.album && !song.album){ song.album = t.album; changed = true; }
+    if (t.language && !song.language){ song.language = t.language; changed = true; }
+    return changed;
+  }
   // main artist from YouTube Music: used when neither the channel nor the description names a singer
   async function ytMusicArtist(song){
     const base = String(song.title || '').replace(/[\(\[][^\)\]]*[\)\]]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -3505,14 +3632,11 @@
     if (info.artists.length){ song.artistList = info.artists; changed = true; }
     if (info.album && !song.album){ song.album = info.album; changed = true; }
     if (changed) refreshChips(song);
-    // iTunes: fills in the singers / movie-album / language the description did not give
-    const it = await itunesLookup(song);
-    if (it){
-      const cur = song.artistList || [];
-      const norm = x => String(x).toLowerCase().replace(/[^\p{L}\p{N}]/gu, '');
-      if (it.artists.length && (!cur.length || cur.every(c => it.artists.some(x => norm(x) === norm(c))))) song.artistList = it.artists;
-      if (it.album && !song.album) song.album = it.album;
-      if (it.language && !song.language) song.language = it.language;
+    // tags: JioSaavn first (best for Indian songs), then iTunes for whatever is still missing
+    applyTags(song, await saavnTagLookup(song));
+    refreshChips(song);
+    if (!song.album || !(song.artistList || []).length || !song.language){
+      applyTags(song, await itunesLookup(song));
       refreshChips(song);
     }
     // still no singer: ask YouTube Music for the main artist
@@ -3543,7 +3667,7 @@
       if (!card) return;
 
       card.addEventListener('click', (e) => {
-        if (e.target.closest('.likeBtn, .queueBtn, .addToPlaylistBtn, .downloadBtn, .followBtn, .progress-wrap, .browse-chip, .backToMusicBtn, .lyrics-scroll, .shuffleBtn, .repeatBtn, .lyricSync, .srcQuick')) return;
+        if (e.target.closest('.likeBtn, .queueBtn, .addToPlaylistBtn, .downloadBtn, .followBtn, .progress-wrap, .progress-hit, .speedBtn, .browse-chip, .backToMusicBtn, .lyrics-scroll, .shuffleBtn, .repeatBtn, .lyricSync, .srcQuick')) return;
         togglePlayPause();
       });
 
@@ -3594,14 +3718,42 @@
         });
       }
 
+      // progress bar: tap to jump, or press and DRAG to scrub (the time follows your finger, the song jumps when you let go)
       const progWrap = card.querySelector('.progress-wrap');
-      progWrap.addEventListener('click', (e) => {
-        e.stopPropagation();
+      const progHit = card.querySelector('.progress-hit');
+      let scrubbing = false;
+      const pctAt = (e) => {
         const rect = progWrap.getBoundingClientRect();
-        const pct = (e.clientX - rect.left) / rect.width;
+        return Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
+      };
+      const showScrub = (pct) => {
         const dur = getDuration();
-        if (dur > 0 && idx === activeIndex) seekTo(pct * dur);
+        const fill = card.querySelector('.progress-fill');
+        const curEl = card.querySelector('.cur-time');
+        if (fill) fill.style.width = (pct * 100) + '%';
+        if (curEl) curEl.textContent = fmtTime(pct * dur);
+      };
+      progHit.addEventListener('pointerdown', (e) => {
+        e.stopPropagation(); e.preventDefault();
+        if (idx !== activeIndex || !(getDuration() > 0)) return;
+        scrubbing = true; scrubActive = true;
+        try { progHit.setPointerCapture(e.pointerId); } catch(err){}
+        showScrub(pctAt(e));
       });
+      progHit.addEventListener('pointermove', (e) => {
+        if (!scrubbing) return;
+        e.stopPropagation();
+        showScrub(pctAt(e));
+      });
+      const endScrub = (e, commit) => {
+        if (!scrubbing) return;
+        scrubbing = false; scrubActive = false;
+        e.stopPropagation();
+        if (commit){ const dur = getDuration(); if (dur > 0) seekTo(pctAt(e) * dur); }
+      };
+      progHit.addEventListener('pointerup', (e) => endScrub(e, true));
+      progHit.addEventListener('pointercancel', (e) => endScrub(e, false));
+      progHit.addEventListener('click', (e) => e.stopPropagation());
     });
   }
 
@@ -3731,7 +3883,7 @@
         st.cursor = (r && r.cursor) || '';
         if (!st.cursor) st.done = true;
         const raws = ((r && r.items) || [])
-          .filter(x => x.id && (!x.dur || (x.dur >= 45 && x.dur <= 1500)))
+          .filter(x => x.id && (!x.dur || (x.dur >= 45 && x.dur <= 14400)))
           .map(x => ytMakeRaw(x.id, x.title, x.author || st.name, x.dur));
         if (appendSearchRows(st, raws)) break;
       }
@@ -4088,15 +4240,17 @@
     document.getElementById('searchResults').innerHTML = '';
     document.getElementById('searchStatus').textContent = 'Search for songs, artists, or movies';
     document.getElementById('searchPlayRow').classList.add('hidden');
+    renderSearchMoodRow(); syncSearchMoodRow();
     document.getElementById('searchInput').focus();
   }
 
-  function openBrowse(type, value){
+  function openBrowse(type, value, labelOverride){
     returnAction = null;
     const modal = document.getElementById('searchModal');
     modal.classList.remove('hidden');
     modal.classList.add('flex');
     document.getElementById('searchInput').value = value;
+    renderSearchMoodRow(); syncSearchMoodRow();
     if (type !== 'channel' && searchFilter !== 'songs'){ searchFilter = 'songs'; paintSearchFilter('songs'); }
     if (type === 'artist'){
       if (NATIVE) runChannelBrowse(value, true);     // app: open the artist's YouTube channel
@@ -4108,7 +4262,7 @@
       return;
     }
     const prefix = type === 'movie' ? 'Songs from' : type === 'channel' ? 'From' : 'More';
-    runSearch(value, `${prefix} "${value}"`);
+    runSearch(value, labelOverride || `${prefix} "${value}"`);
   }
 
   // Tries the real artist-catalog lookup first (see ARTIST CATALOG above);
@@ -4214,6 +4368,7 @@
   document.getElementById('searchInput').addEventListener('input', (e) => {
     clearTimeout(searchDebounce);
     const q = e.target.value;
+    syncSearchMoodRow();
     searchDebounce = setTimeout(() => runSearch(q), 400);
   });
   document.getElementById('searchInput').addEventListener('keydown', (e) => {
@@ -4461,10 +4616,12 @@
       const pct = dur > 0 ? Math.min(100, (cur/dur)*100) : 0;
 
       const fill = card.querySelector('.progress-fill');
-      if (fill) fill.style.width = pct + '%';
       const curEl = card.querySelector('.cur-time');
       const durEl = card.querySelector('.dur-time');
-      if (curEl) curEl.textContent = fmtTime(cur);
+      if (!scrubActive){                       // while the finger drags the bar, the bar belongs to the finger
+        if (fill) fill.style.width = pct + '%';
+        if (curEl) curEl.textContent = fmtTime(cur);
+      }
       if (durEl) durEl.textContent = fmtTime(dur);
 
       if (song.lyrics && song.lyrics.length){
@@ -5297,6 +5454,7 @@
     // NEW: shuffle / repeat toggle buttons on each card.
     const lyricBtn = e.target.closest('.lyricOffsetBtn');
     if (lyricBtn){ nudgeLyrics(Number(lyricBtn.dataset.delta)); return; }
+    if (e.target.closest('.speedBtn')){ openSpeedSheet(); return; }
     if (e.target.closest('.shuffleBtn')){ toggleShuffle(); return; }
     if (e.target.closest('.repeatBtn')){ toggleRepeat(); return; }
   });
@@ -5389,13 +5547,79 @@
       </span>
     </button>`;
   }
+
+  // ---- MOODS: pick a mood (and a language) -> songs for that mood --------------------------------
+  const MOODS = [
+    { id: 'happy',        emoji: '😊', label: 'Happy',        term: 'happy feel good',    color: 'from-yellow-400 to-orange-500' },
+    { id: 'sad',          emoji: '😢', label: 'Sad',          term: 'sad',                color: 'from-slate-600 to-indigo-700' },
+    { id: 'romantic',     emoji: '💕', label: 'Romantic',     term: 'romantic love',      color: 'from-pink-500 to-rose-500' },
+    { id: 'party',        emoji: '🎉', label: 'Party',        term: 'party dance',        color: 'from-fuchsia-600 to-purple-600' },
+    { id: 'workout',      emoji: '💪', label: 'Workout',      term: 'workout gym',        color: 'from-orange-600 to-red-600' },
+    { id: 'chill',        emoji: '😌', label: 'Chill',        term: 'chill relaxing',     color: 'from-teal-500 to-cyan-500' },
+    { id: 'focus',        emoji: '🎧', label: 'Focus',        term: 'focus study lofi',   color: 'from-blue-600 to-sky-500' },
+    { id: 'sleep',        emoji: '😴', label: 'Sleep',        term: 'sleep calm soft',    color: 'from-indigo-700 to-violet-800' },
+    { id: 'heartbreak',   emoji: '💔', label: 'Heartbreak',   term: 'heartbreak breakup', color: 'from-rose-700 to-red-900' },
+    { id: 'motivational', emoji: '🔥', label: 'Motivation',   term: 'motivational',       color: 'from-amber-500 to-red-500' },
+    { id: 'devotional',   emoji: '🙏', label: 'Devotional',   term: 'bhajan devotional',  color: 'from-orange-400 to-yellow-500' },
+    { id: 'roadtrip',     emoji: '🚗', label: 'Road Trip',    term: 'road trip travel',   color: 'from-emerald-500 to-teal-600' },
+    { id: 'rain',         emoji: '🌧️', label: 'Rain',         term: 'rain monsoon',       color: 'from-sky-600 to-blue-800' },
+    { id: 'retro',        emoji: '📻', label: 'Retro',        term: 'old classic evergreen', color: 'from-amber-700 to-stone-700' },
+    { id: 'lofi',         emoji: '🌙', label: 'Lo-fi',        term: 'lofi slowed reverb', color: 'from-purple-600 to-slate-700' }
+  ];
+  const MOOD_LANGS = [
+    { id: 'hindi', label: 'Hindi', word: 'hindi' },
+    { id: 'punjabi', label: 'Punjabi', word: 'punjabi' },
+    { id: 'haryanvi', label: 'Haryanvi', word: 'haryanvi' },
+    { id: 'bhojpuri', label: 'Bhojpuri', word: 'bhojpuri' },
+    { id: 'english', label: 'English', word: 'english' },
+    { id: 'all', label: 'All', word: '' }
+  ];
+  const LS_MOOD_LANG = 'vibe_mood_lang';
+  let moodLang = getLS(LS_MOOD_LANG, 'hindi');
+  function moodLangObj(){ return MOOD_LANGS.find(l => l.id === moodLang) || MOOD_LANGS[0]; }
+  function moodQuery(m){ return (moodLangObj().word + ' ' + m.term + ' songs').trim().replace(/\s+/g, ' '); }
+  function moodLabel(m){ return `${m.emoji} ${m.label}${moodLangObj().id === 'all' ? '' : ' · ' + moodLangObj().label}`; }
+  function renderLangPills(){
+    const el = document.getElementById('langPills');
+    if (!el) return;
+    el.innerHTML = MOOD_LANGS.map(l => `<button class="langPill flex-shrink-0 px-3.5 py-1.5 rounded-full text-xs font-semibold ${l.id === moodLang ? 'bg-white text-black' : 'bg-white/10'}" data-lang="${l.id}">${l.label}</button>`).join('');
+    el.querySelectorAll('.langPill').forEach(b => b.addEventListener('click', () => {
+      moodLang = b.dataset.lang; setLS(LS_MOOD_LANG, moodLang);
+      renderLangPills();
+    }));
+  }
   function renderMoodGrid(){
-    document.getElementById('moodGrid').innerHTML = MOOD_TILES.map(m => `
-      <button class="moodTile text-left p-3 rounded-2xl bg-gradient-to-br ${m.color} aspect-square flex flex-col justify-between" data-query="${escapeHTML(m.query)}">
+    renderLangPills();
+    document.getElementById('moodGrid').innerHTML = MOODS.map(m => `
+      <button class="moodTile text-left p-3 rounded-2xl bg-gradient-to-br ${m.color} aspect-square flex flex-col justify-between active:scale-95 transition-transform" data-id="${m.id}">
         <span class="text-2xl">${m.emoji}</span>
         <span class="text-xs font-bold leading-tight">${escapeHTML(m.label)}</span>
       </button>`).join('');
-    document.querySelectorAll('.moodTile').forEach(btn => btn.addEventListener('click', () => openBrowse('genre', btn.dataset.query)));
+    document.querySelectorAll('.moodTile').forEach(btn => btn.addEventListener('click', () => {
+      const m = MOODS.find(x => x.id === btn.dataset.id);
+      if (m) openBrowse('genre', moodQuery(m), moodLabel(m));
+    }));
+  }
+  // quick mood chips inside the search page (shown while the search box is empty)
+  function syncSearchMoodRow(){
+    const row = document.getElementById('searchMoodRow');
+    if (!row) return;
+    const empty = !document.getElementById('searchInput').value.trim() && !document.getElementById('searchResults').children.length;
+    row.classList.toggle('hidden', !empty);
+  }
+  function renderSearchMoodRow(){
+    const row = document.getElementById('searchMoodRow');
+    if (!row) return;
+    row.innerHTML = MOODS.map(m => `<button class="searchMoodChip flex-shrink-0 px-3 py-1.5 rounded-full text-xs font-semibold bg-white/10 border border-white/10" data-id="${m.id}">${m.emoji} ${escapeHTML(m.label)}</button>`).join('');
+    row.querySelectorAll('.searchMoodChip').forEach(b => b.addEventListener('click', () => {
+      const m = MOODS.find(x => x.id === b.dataset.id);
+      if (!m) return;
+      searchFilter = 'songs'; paintSearchFilter('songs');
+      const q = moodQuery(m);
+      document.getElementById('searchInput').value = q;
+      row.classList.add('hidden');
+      runSearch(q, moodLabel(m));
+    }));
   }
   function renderArtistRadioRow(){
     document.getElementById('artistRadioRow').innerHTML = ARTIST_RADIO_NAMES.map(name => `
@@ -5424,13 +5648,13 @@
   }
   // Daily Mix quality filter: no Instagram-reel / viral clips, dehati or meme-style tracks,
   // jukeboxes or DJ-bass uploads. Checks title, artist/channel and movie, plus length for YouTube clips.
-  const JUNK_RE = /\b(reels?|insta(?:gram)?|viral|dehati|dehaati|deshi|shorts?|tiktok|meme|funny|comedy|ringtone|jukebox|non-?stop|compilation|dj remix|dj song|dj mix|bass boosted|hard bass|vibration|trending|cringe)\b|देहाती/i;
+  const JUNK_RE = /\b(dehati|dehaati|deshi|shorts?|tiktok|meme|funny|comedy|ringtone|bass boosted|hard bass|vibration|cringe)\b|देहाती/i;   // reels / mashups / jukebox / non-stop / DJ remix / compilation are allowed
   function isJunkTrack(s){
     if (!s) return true;
     const txt = [s.title, s.artist, s.album].filter(Boolean).join(' ');
     if (JUNK_RE.test(txt)) return true;
     const d = Number(s.raw && s.raw.duration) || 0;
-    if (s.raw && s.raw._yt && d && (d < 100 || d > 480)) return true;   // reel clips and long mixes
+    if (s.raw && s.raw._yt && d && (d < 60 || d > 14400)) return true;   // only very short clips are dropped; long mashups / jukeboxes are fine
     return false;
   }
   // takes songs round-robin from each list so every language is represented
@@ -5481,7 +5705,7 @@
         const raw = await fetchSaavnBatch(name, perArtist, pages > 1 ? Math.floor(Math.random() * pages) : 0);
         const lite = raw.filter(isAllowedLanguage).map(prepareLiteSong);
         out.push(...lite);
-        if (onEach) onEach(lite);
+        if (onEach) onEach(lite, name);
       } catch(e){ /* skip this artist, keep going */ }
     }));
     return out;
@@ -5537,10 +5761,36 @@
       ? served.concat((history || []).slice(-400).map(h => h && h.id).filter(Boolean))
       : served.slice(-80));
 
-    const seen = new Set(), all = [], skipped = [];
+    const seen = new Set(), all = [], skipped = [], ordered = [];
     const b1 = { left: nFollowed }, b2 = { left: nFamiliar }, b3 = { left: nNew };
-    // takes what still fits in this bucket's quota, drops junk/duplicates/recent songs, sends it on
-    const emit = (bucket, list, cap, force) => {
+
+    // MIXING: every search / artist answers on its own time. Instead of playing them in the order they
+    // arrive (a Punjabi batch, then a Haryanvi batch, then a Hindi batch), they wait in "groups" and are
+    // handed to the player round-robin: one song from each language / artist in turn.
+    const groups = new Map();
+    let headSent = false, headTimer = null, bulkTimer = null;
+    const deliver = (list) => { if (list.length){ ordered.push(...list); if (onChunk) onChunk(list); } };
+    const interleave = (max) => {
+      const keys = shuffleCopy([...groups.keys()].filter(k => groups.get(k).length));
+      const out = [];
+      while (keys.length && out.length < max){
+        for (let i = 0; i < keys.length && out.length < max; i++){
+          const arr = groups.get(keys[i]);
+          if (arr.length) out.push(arr.shift());
+        }
+        for (let i = keys.length - 1; i >= 0; i--) if (!groups.get(keys[i]).length) keys.splice(i, 1);
+      }
+      return out;
+    };
+    const flushHead = () => { if (headSent) return; headSent = true; clearTimeout(headTimer); deliver(interleave(3)); };   // a few songs first, so music starts fast
+    const flushBulk = () => { clearTimeout(bulkTimer); deliver(interleave(1000)); };
+    const schedule = () => {
+      if (!headSent){ if (!headTimer) headTimer = setTimeout(flushHead, 1300); }
+      else { clearTimeout(bulkTimer); bulkTimer = setTimeout(flushBulk, 1000); }
+    };
+
+    // takes what still fits in this bucket's quota, drops junk/duplicates/recent songs, files them in their group
+    const emit = (bucket, list, cap, force, groupKey) => {
       let room = Math.min(bucket.left, cap || bucket.left);
       if (room <= 0) return 0;
       const take = [];
@@ -5556,7 +5806,9 @@
       if (!take.length) return 0;
       bucket.left -= take.length;
       all.push(...take);
-      if (onChunk) onChunk(take);
+      const gk = groupKey || ('g' + Math.random());
+      groups.set(gk, (groups.get(gk) || []).concat(take));
+      schedule();
       return take.length;
     };
 
@@ -5565,16 +5817,16 @@
       : likedArtists.length ? likedArtists
       : ARTIST_RADIO_NAMES;
     const pages = mode === 'familiar' ? 2 : 3;
-    const p1 = fetchArtistPool(shuffleCopy(followedPool).slice(0, 5), 8, l => emit(b1, l), pages);
+    const p1 = fetchArtistPool(shuffleCopy(followedPool).slice(0, 5), 8, (l, name) => emit(b1, l, undefined, false, 'a:' + name), pages);
 
     // ---- Bucket 2: Content-based "familiar to favorites" ----
     const familiarPool = [...new Set([...likedArtists, ...playlistArtists])]
       .filter(a => !followedArtists.includes(a));
     const p2 = (async () => {
-      await fetchArtistPool(shuffleCopy(familiarPool).slice(0, 5), 8, l => emit(b2, l), pages);
+      await fetchArtistPool(shuffleCopy(familiarPool).slice(0, 5), 8, (l, name) => emit(b2, l, undefined, false, 'f:' + name), pages);
       if (b2.left === nFamiliar){
         const h = await fetchHomeSection('Bollywood Mix', 12).catch(() => []);
-        emit(b2, dedupeLite(h));
+        emit(b2, dedupeLite(h), undefined, false, 'f:home');
       }
     })();
 
@@ -5585,26 +5837,32 @@
     const termsPer = mode === 'fresh' ? 2 : 1;
     const jobs = [];
     for (const lang of Object.keys(pool)){
-      shuffleCopy(pool[lang]).slice(0, termsPer).forEach(q => jobs.push(q));
+      shuffleCopy(pool[lang]).slice(0, termsPer).forEach(q => jobs.push({ q, lang }));
     }
-    const capPer = Math.ceil(nNew / jobs.length) + 1;
-    const p3 = Promise.all(jobs.map(async q => {
+    // every language gets an equal share, so the one that answers first cannot take all the places
+    const langList = Object.keys(pool);
+    const langQuota = Math.ceil(nNew / langList.length);
+    const bLang = {};
+    langList.forEach(l => { bLang[l] = { left: langQuota }; });
+    const capPer = Math.ceil(langQuota / termsPer) + 1;
+    const p3 = Promise.all(jobs.map(async job => {
       let r = [];
       const page = 1 + Math.floor(Math.random() * (mode === 'fresh' ? 3 : 2));
       try {
-        r = await ytSearchTimed(q, page, 7000, page === 1 ? { date: 'month', sort: 'view_count' } : undefined);
-        if (r.length < 6 && page > 1) r = r.concat(await ytSearchTimed(q, 1, 6000));
+        r = await ytSearchTimed(job.q, page, 7000, page === 1 ? { date: 'month', sort: 'view_count' } : undefined);
+        if (r.length < 6 && page > 1) r = r.concat(await ytSearchTimed(job.q, 1, 6000));
       } catch(e){}
-      emit(b3, dedupeLite(r.filter(isAllowedLanguage).map(prepareLiteSong)), capPer);
+      emit(bLang[job.lang], dedupeLite(r.filter(isAllowedLanguage).map(prepareLiteSong)), capPer, false, 'l:' + job.lang);
     }));
 
     await Promise.all([p1, p2, p3]);
     // if the "no repeats" rule left the mix too short, top it up with the skipped ones
     if (all.length < Math.min(12, targetSize)){
-      emit({ left: targetSize - all.length }, skipped, 0, true);
+      emit({ left: targetSize - all.length }, skipped, 0, true, 'x:topup');
     }
-    markMixServed(all.map(x => x.raw.id));
-    return all;
+    flushHead(); flushBulk();
+    markMixServed(ordered.map(x => x.raw.id));
+    return ordered;
   }
 
   // Cached 24h per the product spec (localStorage-scoped here — there's no
